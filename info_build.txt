@@ -1,0 +1,85 @@
+Проблема в том, что JAR-файл содержит в себе **символические ссылки** или неправильные точки входа. Когда вы запускаете JAR, Java пытается найти главный класс, но вместо этого находит PostgreSQL JDBC Driver и пытается запустить его как основную программу.
+
+## Исправление:
+
+### 1. **Проверьте MANIFEST.MF файл в JAR:**
+```bash
+cd /data/data/com.termux/files/home/EasyWebServerGit/out/artifacts/EasyWebServer_jar/
+jar xf EasyWebServer.jar META-INF/MANIFEST.MF
+cat META-INF/MANIFEST.MF
+```
+
+### 2. **Если Main-Class не указан, создайте новый JAR с правильным манифестом:**
+
+Создайте файл `manifest.txt`:
+```
+Main-Class: ru.miacomsoft.Main
+Class-Path: .
+```
+
+Соберите JAR заново:
+```bash
+cd /data/data/com.termux/files/home/EasyWebServerGit
+jar cfm EasyWebServer.jar manifest.txt -C out/artifacts/EasyWebServer_jar .
+```
+
+### 3. **Или исправьте сборку в вашем проекте (рекомендуется):**
+
+Скорее всего проблема в конфигурации сборки. Проверьте:
+
+**Для IntelliJ IDEA:**
+1. File → Project Structure
+2. Artifacts → JAR → "From modules with dependencies"
+3. Убедитесь, что:
+   - **Main Class** указан как `ru.miacomsoft.Main`
+   - ✅ "Include in project build"
+   - ✅ "Copy to the output directory and link via manifest"
+
+**Правильная конфигурация MANIFEST.MF должна содержать:**
+```
+Manifest-Version: 1.0
+Main-Class: ru.miacomsoft.Main
+```
+
+### 4. **Альтернативный способ запуска (если не хотите пересобирать JAR):**
+
+Запустите напрямую через Java с указанием главного класса:
+```bash
+java -cp /data/data/com.termux/files/home/EasyWebServerGit/out/artifacts/EasyWebServer_jar/EasyWebServer.jar ru.miacomsoft.Main
+```
+
+### 5. **Исправьте скрипт запуска `startEasyWebServerGit.sh`:**
+
+Замените содержимое скрипта на:
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+cd /data/data/com.termux/files/home/EasyWebServerGit
+
+# Способ 1: Через MANIFEST (если он правильный)
+java -jar out/artifacts/EasyWebServer_jar/EasyWebServer.jar
+
+# ИЛИ Способ 2: Прямой вызов главного класса
+# java -cp "out/artifacts/EasyWebServer_jar/EasyWebServer.jar" ru.miacomsoft.Main
+```
+
+### 6. **Проверка структуры JAR:**
+```bash
+# Посмотрите, что внутри JAR
+jar tf EasyWebServer.jar | head -30
+
+# Проверьте, есть ли главный класс
+jar tf EasyWebServer.jar | grep -i "\.class" | grep -i "main"
+```
+
+## Что происходит:
+1. PostgreSQL JDBC Driver находится в вашем JAR, но это нормально
+2. Проблема в том, что **система сборки создала некорректный MANIFEST.MF**
+3. Java пытается найти `Main-Class`, но вместо этого находит JDBC драйвер
+
+## Краткое решение:
+**Запустите так (вместо `java -jar ...`):**
+```bash
+java -cp "out/artifacts/EasyWebServer_jar/EasyWebServer.jar" ru.miacomsoft.Main
+```
+
+Или исправьте конфигурацию сборки в IDE, чтобы в MANIFEST.MF правильно указывался главный класс.

@@ -1,0 +1,1 @@
+java -cp /data/data/com.termux/files/home/EasyWebServerGit/out/artifacts/EasyWebServer_jar/EasyWebServer.jar ru.miacomsoft.Main
