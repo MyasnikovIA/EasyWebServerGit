@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class OracleQuery {
 
+
     // Пул соединений для каждой конфигурации БД
     private static final Map<String, ConnectionPool> connectionPools = new HashMap<>();
 
@@ -39,13 +40,6 @@ public class OracleQuery {
     static {
         // Устанавливаем таймзону один раз при загрузке класса
         TimeZone.setDefault(TimeZone.getTimeZone("Asia/Kolkata"));
-    }
-
-    /**
-     * Получает подключение к Oracle из пула
-     */
-    public static Connection getConnect(DatabaseConfig dbConfig) {
-        return getConnect(dbConfig, DEFAULT_POOL_SIZE);
     }
 
     /**
@@ -77,38 +71,7 @@ public class OracleQuery {
         }
     }
 
-    /**
-     * Генерирует ключ для пула соединений
-     */
-    private static String generatePoolKey(DatabaseConfig dbConfig) {
-        return dbConfig.getHost() + ":" +
-                dbConfig.getPort() + ":" +
-                dbConfig.getDatabase() + ":" +
-                dbConfig.getUsername();
-    }
 
-    /**
-     * Создает прямое соединение (fallback метод)
-     */
-    private static Connection createDirectConnection(DatabaseConfig dbConfig) {
-        try {
-            Class.forName("oracle.jdbc.driver.OracleDriver");
-            String jdbcUrl = formatOracleJdbcUrl(dbConfig);
-            Connection conn = DriverManager.getConnection(
-                    jdbcUrl,
-                    dbConfig.getUsername(),
-                    dbConfig.getPassword()
-            );
-            // Устанавливаем полезные параметры для Oracle
-            conn.setAutoCommit(false);
-            return conn;
-        } catch (Exception e) {
-            if (DEBUG) {
-                System.err.println("Direct connection failed: " + e.getMessage());
-            }
-            return null;
-        }
-    }
 
     /**
      * Форматирует JDBC URL для Oracle
@@ -710,6 +673,7 @@ public class OracleQuery {
         private final int maxSize;
         private int created = 0;
 
+        // Конструктор для DatabaseConfig
         ConnectionPool(DatabaseConfig dbConfig, int size) {
             this.dbConfig = dbConfig;
             this.maxSize = size;
@@ -780,6 +744,16 @@ public class OracleQuery {
         }
 
         void close() {
+            List<PooledConnection> connections = new ArrayList<>();
+            pool.drainTo(connections);
+            for (PooledConnection conn : connections) {
+                try {
+                    conn.realClose();
+                } catch (Exception ignored) {}
+            }
+        }
+
+        public void shutdown() {
             List<PooledConnection> connections = new ArrayList<>();
             pool.drainTo(connections);
             for (PooledConnection conn : connections) {
@@ -904,5 +878,38 @@ public class OracleQuery {
         @Override public int getNetworkTimeout() throws SQLException { return delegate.getNetworkTimeout(); }
         @Override public <T> T unwrap(Class<T> iface) throws SQLException { return delegate.unwrap(iface); }
         @Override public boolean isWrapperFor(Class<?> iface) throws SQLException { return delegate.isWrapperFor(iface); }
+    }
+
+
+    public static void shutdownPools() {
+        for (ConnectionPool pool : connectionPools.values()) {
+            pool.shutdown();
+        }
+        connectionPools.clear();
+    }
+
+    public static Connection getConnect(DatabaseConfig dbConfig) {
+        return getConnect(dbConfig, DEFAULT_POOL_SIZE);
+    }
+
+    private static String generatePoolKey(DatabaseConfig dbConfig) {
+        return dbConfig.getHost() + ":" + dbConfig.getPort() + ":" +
+                dbConfig.getDatabase() + ":" + dbConfig.getUsername();
+    }
+
+
+    // createDirectConnection:
+    private static Connection createDirectConnection(DatabaseConfig dbConfig) {
+        try {
+            Class.forName("oracle.jdbc.driver.OracleDriver");
+            String jdbcUrl = formatOracleJdbcUrl(dbConfig);
+            Connection conn = DriverManager.getConnection(jdbcUrl,
+                    dbConfig.getUsername(), dbConfig.getPassword());
+            conn.setAutoCommit(false);
+            return conn;
+        } catch (Exception e) {
+            System.err.println("Direct connection failed: " + e.getMessage());
+            return null;
+        }
     }
 }

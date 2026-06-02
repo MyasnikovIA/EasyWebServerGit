@@ -65,6 +65,8 @@ public class WebServer implements Runnable {
     static void shutDown() {
         try {
             LOGGER.info("Shutting down server...");
+            OracleQuery.shutdownPools();
+            PostgreQuery.shutdownPools();
             server.stop();
         } catch (Exception e) {
             e.printStackTrace();

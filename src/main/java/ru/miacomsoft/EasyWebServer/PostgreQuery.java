@@ -107,9 +107,8 @@ public class PostgreQuery {
         return getConnectFromUrl(ServerConstant.config.DATABASE_NAME, userName, userPass);
     }
 
-    /**
-     * Подключение через DatabaseConfig
-     */
+    // PostgreQuery.java - исправить метод getConnectFromConfig (строка ~115)
+
     private static Connection getConnectFromConfig(DatabaseConfig dbConfig, String userName, String userPass) {
         String poolKey = generatePoolKey(dbConfig, userName);
         ConnectionPool pool = connectionPools.get(poolKey);
@@ -118,8 +117,8 @@ public class PostgreQuery {
             synchronized (PostgreQuery.class) {
                 pool = connectionPools.get(poolKey);
                 if (pool == null) {
-                    pool = new ConnectionPool(dbConfig, userName, userPass,
-                            DEFAULT_MIN_POOL_SIZE, DEFAULT_MAX_POOL_SIZE);
+                    // ИСПРАВЛЕНО: используем правильный конструктор
+                    pool = new ConnectionPool(dbConfig, DEFAULT_MIN_POOL_SIZE, DEFAULT_MAX_POOL_SIZE);
                     connectionPools.put(poolKey, pool);
                 }
             }
@@ -1413,8 +1412,8 @@ public class PostgreQuery {
         }
 
         // Конструктор для DatabaseConfig
-        ConnectionPool(DatabaseConfig dbConfig, String userName, String userPass, int minSize, int maxSize) {
-            this(dbConfig.getJdbcUrl(), userName, userPass, minSize, maxSize);
+        public ConnectionPool(DatabaseConfig dbConfig, int minSize, int maxSize) {
+            this(dbConfig.getJdbcUrl(), dbConfig.getUsername(), dbConfig.getPassword(), minSize, maxSize);
         }
 
         private PooledConnection createPooledConnection() throws SQLException {
@@ -1425,8 +1424,8 @@ public class PostgreQuery {
                 Properties props = new Properties();
                 props.setProperty("user", userName);
                 props.setProperty("password", userPass);
-                props.setProperty("socketTimeout", "30"); // 30 секунд
-                props.setProperty("connectTimeout", "10"); // 10 секунд
+                props.setProperty("socketTimeout", "30");
+                props.setProperty("connectTimeout", "10");
                 props.setProperty("tcpKeepAlive", "true");
 
                 Connection conn = DriverManager.getConnection(url, props);
@@ -1455,14 +1454,11 @@ public class PostgreQuery {
                     try {
                         Long lastUsedTime = lastUsed.get(conn);
 
-                        if (lastUsedTime != null &&
-                                now - lastUsedTime > MAX_IDLE_TIME) {
+                        if (lastUsedTime != null && now - lastUsedTime > MAX_IDLE_TIME) {
                             try {
                                 conn.realClose();
                                 created.decrementAndGet();
-                            } catch (Exception e) {
-                                // Игнорируем
-                            }
+                            } catch (Exception e) {}
                             try {
                                 PooledConnection newConn = createPooledConnection();
                                 pool.offer(newConn);
@@ -1478,9 +1474,7 @@ public class PostgreQuery {
                             try {
                                 conn.realClose();
                                 created.decrementAndGet();
-                            } catch (Exception e) {
-                                // Игнорируем
-                            }
+                            } catch (Exception e) {}
 
                             try {
                                 PooledConnection newConn = createPooledConnection();
@@ -1499,9 +1493,7 @@ public class PostgreQuery {
                                 try {
                                     conn.realClose();
                                     created.decrementAndGet();
-                                } catch (Exception ex) {
-                                    // Игнорируем
-                                }
+                                } catch (Exception ex) {}
 
                                 try {
                                     PooledConnection newConn = createPooledConnection();
@@ -1517,9 +1509,7 @@ public class PostgreQuery {
                     } catch (Exception e) {
                         try {
                             pool.offer(conn);
-                        } catch (Exception ex) {
-                            // Игнорируем
-                        }
+                        } catch (Exception ex) {}
                     }
                 }
 
@@ -1745,4 +1735,62 @@ public class PostgreQuery {
         @Override public <T> T unwrap(Class<T> iface) throws SQLException { return delegate.unwrap(iface); }
         @Override public boolean isWrapperFor(Class<?> iface) throws SQLException { return delegate.isWrapperFor(iface); }
     }
+
+
+
+
+    // НУЖНО ДОБАВИТЬ метод shutdownPools:
+    public static void shutdownPools() {
+        for (ConnectionPool pool : connectionPools.values()) {
+            pool.shutdown();
+        }
+        connectionPools.clear();
+    }
+
+    // НУЖНО ДОБАВИТЬ метод getConnect:
+    public static Connection getConnect(DatabaseConfig dbConfig) {
+        if (dbConfig == null) return null;
+
+        String poolKey = dbConfig.getHost() + ":" + dbConfig.getPort() + ":" +
+                dbConfig.getDatabase() + ":" + dbConfig.getUsername();
+        ConnectionPool pool = connectionPools.get(poolKey);
+
+        if (pool == null) {
+            synchronized (PostgreQuery.class) {
+                pool = connectionPools.get(poolKey);
+                if (pool == null) {
+                    pool = new ConnectionPool(dbConfig, DEFAULT_MIN_POOL_SIZE, DEFAULT_MAX_POOL_SIZE);
+                    connectionPools.put(poolKey, pool);
+                }
+            }
+        }
+
+        try {
+            return pool.getConnection();
+        } catch (Exception e) {
+            System.err.println("Error getting connection from pool: " + e.getMessage());
+            return createDirectConnection(dbConfig);
+        }
+    }
+
+    // НУЖНО ДОБАВИТЬ createDirectConnection:
+    private static Connection createDirectConnection(DatabaseConfig dbConfig) {
+        try {
+            Class.forName("org.postgresql.Driver");
+            Connection conn = DriverManager.getConnection(dbConfig.getJdbcUrl(),
+                    dbConfig.getUsername(), dbConfig.getPassword());
+            conn.setAutoCommit(false);
+            if (dbConfig.getSchema() != null && !dbConfig.getSchema().isEmpty()) {
+                try (Statement stmt = conn.createStatement()) {
+                    stmt.execute("SET search_path TO '" + dbConfig.getSchema() + "'");
+                }
+            }
+            return conn;
+        } catch (Exception e) {
+            System.err.println("Direct connection failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+
 }
