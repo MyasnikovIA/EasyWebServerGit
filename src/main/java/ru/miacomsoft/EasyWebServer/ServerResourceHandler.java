@@ -145,7 +145,6 @@ public class ServerResourceHandler implements Runnable {
         }
         return -1;
     }
-
     private boolean readRequestHeader() throws IOException {
         int charInt;
         StringBuffer sb = new StringBuffer();
@@ -271,7 +270,7 @@ public class ServerResourceHandler implements Runnable {
                         titleLine = titleLine.substring(0, httpIndex);
                     }
                 }
-                if (titleLine.trim().length() == 0) {
+                if (titleLine == null || titleLine.trim().isEmpty() || titleLine.equals("/")) {
                     titleLine = ServerConstant.config.INDEX_PAGE;
                 }
                 titleLine = URLDecoder.decode(titleLine, StandardCharsets.UTF_8.toString());
@@ -521,6 +520,11 @@ public class ServerResourceHandler implements Runnable {
      * Процедура отправки ответа клиенту (браузеру)
      */
     private void sendResponseQuery() {
+        if (query.requestPath == null ||
+                query.requestPath.equals("/") ||
+                query.requestPath.trim().isEmpty()) {
+            query.requestPath = ServerConstant.config.INDEX_PAGE;
+        }
         // Установка MIME-типа
         setMimeType();
 
