@@ -23,6 +23,7 @@ public class WebServer implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(WebServer.class.getName());
     private static boolean isRunServer = false;
     private static WebServer server;
+    private HttpsServerWrapper httpsServer;
 
     /**
      *
@@ -42,6 +43,10 @@ public class WebServer implements Runnable {
      */
     public static void start() {
         server = new WebServer();
+
+        // Запуск HTTPS если настроен
+        server.initHttps();
+
         Thread thread = new Thread(server);
         thread.start();
         Runtime.getRuntime().addShutdownHook(new ShutDown());
@@ -59,22 +64,6 @@ public class WebServer implements Runnable {
         isRunServer = false;
     }
 
-    /**
-     *
-     */
-    static void shutDown() {
-        try {
-            LOGGER.info("Shutting down server...");
-            OracleQuery.shutdownPools();
-            PostgreQuery.shutdownPools();
-            server.stop();
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        synchronized (server) {
-            server.notifyAll();
-        }
-    }
 
     /**
      * @param path
@@ -403,6 +392,63 @@ public class WebServer implements Runnable {
         return os.equals("linux") || os.equals("mac") ||
                 os.equals("solaris") || os.equals("bsd") ||
                 os.equals("aix");
+    }
+    /**
+     * Инициализация HTTPS сервера (НОВЫЙ МЕТОД)
+     */
+    private void initHttps() {
+        // Проверяем, нужно ли запускать HTTPS
+        if (ServerConstant.config.HTTPS_PORT <= 0) {
+            System.out.println("HTTPS отключён (порт <= 0)");
+            return;
+        }
+
+        try {
+            // Если указан путь к keystore - используем его
+            if (ServerConstant.config.KEYSTORE_PATH != null && !ServerConstant.config.KEYSTORE_PATH.isEmpty()) {
+                String keyPass = ServerConstant.config.KEY_PASSWORD;
+                if (keyPass == null || keyPass.isEmpty()) {
+                    keyPass = ServerConstant.config.KEYSTORE_PASSWORD;
+                }
+
+                httpsServer = new HttpsServerWrapper(
+                        ServerConstant.config.HTTPS_PORT,
+                        ServerConstant.config.KEYSTORE_PATH,
+                        ServerConstant.config.KEYSTORE_PASSWORD,
+                        keyPass
+                );
+            } else {
+                // Иначе используем самоподписанный сертификат (только для разработки)
+                System.out.println("⚠️ Ключевое хранилище не указано, используется самоподписанный сертификат");
+                httpsServer = new HttpsServerWrapper(ServerConstant.config.HTTPS_PORT);
+            }
+
+            httpsServer.start();
+
+        } catch (Exception e) {
+            System.err.println("Ошибка инициализации HTTPS: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // В методе shutDown() добавить остановку HTTPS:
+    static void shutDown() {
+        try {
+            LOGGER.info("Shutting down server...");
+
+            if (server != null && server.httpsServer != null) {
+                server.httpsServer.stop();
+            }
+
+            OracleQuery.shutdownPools();
+            PostgreQuery.shutdownPools();
+            server.stop();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        synchronized (server) {
+            server.notifyAll();
+        }
     }
 }
 

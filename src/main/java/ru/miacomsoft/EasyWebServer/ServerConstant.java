@@ -28,6 +28,11 @@ public final class ServerConstant {
     public int POSTGRES_MIN_POOL_SIZE = 2; // минимальное количество соединений PostgreSQL
     public int POSTGRES_MAX_POOL_SIZE = 20; // максимальное количество соединений PostgreSQL
 
+    public int HTTPS_PORT = 443;           // порт для HTTPS (по умолчанию 443)
+    public String KEYSTORE_PATH = "";       // путь к файлу keystore
+    public String KEYSTORE_PASSWORD = "";   // пароль keystore
+    public String KEY_PASSWORD = "";        // пароль ключа (опционально)
+
 
     // Новая структура для хранения множественных БД
     public Map<String, DatabaseConfig> DATABASES = new HashMap<>();
@@ -260,6 +265,11 @@ public final class ServerConstant {
         setIntIfPresent(jsonConfig, "ORACLE_POOL_SIZE", val -> ORACLE_POOL_SIZE = val);
         setIntIfPresent(jsonConfig, "POSTGRES_MIN_POOL_SIZE", val -> POSTGRES_MIN_POOL_SIZE = val);
         setIntIfPresent(jsonConfig, "POSTGRES_MAX_POOL_SIZE", val -> POSTGRES_MAX_POOL_SIZE = val);
+
+        setIfPresent(jsonConfig, "KEYSTORE_PATH", val -> KEYSTORE_PATH = val);
+        setIfPresent(jsonConfig, "KEYSTORE_PASSWORD", val -> KEYSTORE_PASSWORD = val);
+        setIfPresent(jsonConfig, "KEY_PASSWORD", val -> KEY_PASSWORD = val);
+        setIntIfPresent(jsonConfig, "HTTPS_PORT", val -> HTTPS_PORT = val);
     }
 
     private void setIfPresent(JSONObject json, String key, StringConsumer setter) {

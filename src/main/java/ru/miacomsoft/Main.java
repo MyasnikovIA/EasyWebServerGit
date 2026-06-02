@@ -6,6 +6,11 @@ import java.io.File;
 import java.net.URL;
 
 public class Main {
+    // # Создание keystore с настоящим сертификатом
+    // keytool -genkey -keyalg RSA -alias easywebserver -keystore keystore.jks -storepass your_password -validity 365 -keysize 2048
+    // # Импорт существующего сертификата (если есть)
+    // keytool -import -alias easywebserver -keystore keystore.jks -file certificate.crt
+
 
     public static void main(String[] args) {
         WebServer web = new WebServer(Main.class);
@@ -31,6 +36,15 @@ public class Main {
         web.config("ORACLE_POOL_SIZE", "15");
         web.config("POSTGRES_MIN_POOL_SIZE", "5");
         web.config("POSTGRES_MAX_POOL_SIZE", "30");
+
+
+       // // Настройка HTTPS
+       // web.config("HTTPS_PORT", "443");
+       // // Для production - используйте настоящий сертификат
+       // web.config("KEYSTORE_PATH", "/etc/ssl/easywebserver/keystore.jks");
+       // web.config("KEYSTORE_PASSWORD", "secure_password");
+       // // ИЛИ для разработки - самоподписанный (не использовать в production!)
+       // // (оставьте KEYSTORE_PATH пустым, будет автоматически создан self-signed)
 
         String os = web.getOS();
         if (os.equals("windows")) {
