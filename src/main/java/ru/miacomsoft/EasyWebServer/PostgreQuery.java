@@ -37,10 +37,6 @@ public class PostgreQuery {
     // Флаг отладки
     private static boolean DEBUG = false;
 
-    // Размер пула соединений по умолчанию
-    private static final int DEFAULT_MIN_POOL_SIZE = 2;
-    private static final int DEFAULT_MAX_POOL_SIZE = 20;
-
     // Таймаут получения соединения из пула
     private static final int CONNECTION_TIMEOUT = 5000;
 
@@ -106,37 +102,6 @@ public class PostgreQuery {
         // Используем стандартную конфигурацию
         return getConnectFromUrl(ServerConstant.config.DATABASE_NAME, userName, userPass);
     }
-
-    // PostgreQuery.java - исправить метод getConnectFromConfig (строка ~115)
-
-    private static Connection getConnectFromConfig(DatabaseConfig dbConfig, String userName, String userPass) {
-        String poolKey = generatePoolKey(dbConfig, userName);
-        ConnectionPool pool = connectionPools.get(poolKey);
-
-        if (pool == null) {
-            synchronized (PostgreQuery.class) {
-                pool = connectionPools.get(poolKey);
-                if (pool == null) {
-                    // ИСПРАВЛЕНО: используем правильный конструктор
-                    pool = new ConnectionPool(dbConfig, DEFAULT_MIN_POOL_SIZE, DEFAULT_MAX_POOL_SIZE);
-                    connectionPools.put(poolKey, pool);
-                }
-            }
-        }
-
-        try {
-            return pool.getConnection();
-        } catch (Exception e) {
-            if (DEBUG) {
-                System.err.println("Error getting connection from pool: " + e.getMessage());
-            }
-            return createDirectConnection(dbConfig, userName, userPass);
-        }
-    }
-
-    /**
-     * Подключение по URL
-     */
     private static Connection getConnectFromUrl(String url, String userName, String userPass) {
         String poolKey = url + "|" + userName;
         ConnectionPool pool = connectionPools.get(poolKey);
@@ -145,8 +110,10 @@ public class PostgreQuery {
             synchronized (PostgreQuery.class) {
                 pool = connectionPools.get(poolKey);
                 if (pool == null) {
+                    // ИСПРАВЛЕНО: используем настройки из ServerConstant
                     pool = new ConnectionPool(url, userName, userPass,
-                            DEFAULT_MIN_POOL_SIZE, DEFAULT_MAX_POOL_SIZE);
+                            ServerConstant.config.POSTGRES_MIN_POOL_SIZE,
+                            ServerConstant.config.POSTGRES_MAX_POOL_SIZE);
                     connectionPools.put(poolKey, pool);
                 }
             }
@@ -1747,7 +1714,6 @@ public class PostgreQuery {
         connectionPools.clear();
     }
 
-    // НУЖНО ДОБАВИТЬ метод getConnect:
     public static Connection getConnect(DatabaseConfig dbConfig) {
         if (dbConfig == null) return null;
 
@@ -1759,7 +1725,9 @@ public class PostgreQuery {
             synchronized (PostgreQuery.class) {
                 pool = connectionPools.get(poolKey);
                 if (pool == null) {
-                    pool = new ConnectionPool(dbConfig, DEFAULT_MIN_POOL_SIZE, DEFAULT_MAX_POOL_SIZE);
+                    pool = new ConnectionPool(dbConfig,
+                            ServerConstant.config.POSTGRES_MIN_POOL_SIZE,
+                            ServerConstant.config.POSTGRES_MAX_POOL_SIZE);
                     connectionPools.put(poolKey, pool);
                 }
             }
@@ -1770,6 +1738,33 @@ public class PostgreQuery {
         } catch (Exception e) {
             System.err.println("Error getting connection from pool: " + e.getMessage());
             return createDirectConnection(dbConfig);
+        }
+    }
+
+    // Также исправить getConnectFromConfig (если используется):
+    private static Connection getConnectFromConfig(DatabaseConfig dbConfig, String userName, String userPass) {
+        String poolKey = generatePoolKey(dbConfig, userName);
+        ConnectionPool pool = connectionPools.get(poolKey);
+
+        if (pool == null) {
+            synchronized (PostgreQuery.class) {
+                pool = connectionPools.get(poolKey);
+                if (pool == null) {
+                    pool = new ConnectionPool(dbConfig,
+                            ServerConstant.config.POSTGRES_MIN_POOL_SIZE,
+                            ServerConstant.config.POSTGRES_MAX_POOL_SIZE);
+                    connectionPools.put(poolKey, pool);
+                }
+            }
+        }
+
+        try {
+            return pool.getConnection();
+        } catch (Exception e) {
+            if (DEBUG) {
+                System.err.println("Error getting connection from pool: " + e.getMessage());
+            }
+            return createDirectConnection(dbConfig, userName, userPass);
         }
     }
 

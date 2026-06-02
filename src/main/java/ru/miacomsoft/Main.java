@@ -16,10 +16,10 @@ public class Main {
         web.config("DATABASE_USER_PASS" , "postgres");
 
         // Дополнительные БД
-        web.config("DATABASES.default", "pdo://postgres:postgres@localhost:5432/Panorama360?currentSchema=public&type=pgsql");
-        web.config("DATABASES.auth", "pdo://postgres:postgres@localhost:5432/auth?currentSchema=auth&type=pgsql");
-        web.config("DATABASES.settings", "pdo://postgres:postgres@localhost:5432/mis?currentSchema=settings&type=pgsql");
-        web.config("DATABASES.org", "pdo://postgres:postgres@localhost:5432/mis?currentSchema=org&type=pgsql");
+        web.config("DATABASES.default", "pdo://postgres:postgres@192.168.241.36:5432/Panorama360?currentSchema=public&type=pgsql");
+        web.config("DATABASES.auth", "pdo://postgres:postgres@192.168.241.36:5432/auth?currentSchema=auth&type=pgsql");
+        web.config("DATABASES.settings", "pdo://postgres:postgres@192.168.241.36:5432/mis?currentSchema=settings&type=pgsql");
+        web.config("DATABASES.org", "pdo://postgres:postgres@192.168.241.36:5432/mis?currentSchema=org&type=pgsql");
         web.config("DATABASES.oracle_test", "oci8://dev:postgres@192.168.241.141:1521/med2dev:pooled");
 
         web.config("LOGIN_PAGE" , "login.html");
@@ -27,6 +27,10 @@ public class Main {
         web.config("INDEX_PAGE" , "index.html");
         web.config("DEBUG" , "false");
         web.config("CAHEBLE" , "true");
+
+        web.config("ORACLE_POOL_SIZE", "15");
+        web.config("POSTGRES_MIN_POOL_SIZE", "5");
+        web.config("POSTGRES_MAX_POOL_SIZE", "30");
 
         String os = web.getOS();
         if (os.equals("windows")) {

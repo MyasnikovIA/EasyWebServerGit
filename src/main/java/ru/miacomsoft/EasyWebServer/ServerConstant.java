@@ -23,6 +23,12 @@ public final class ServerConstant {
     public String DATABASE_USER_NAME = "postgres";
     public String DATABASE_USER_PASS = "******";
 
+
+    public int ORACLE_POOL_SIZE = 10;      // максимальное количество соединений Oracle
+    public int POSTGRES_MIN_POOL_SIZE = 2; // минимальное количество соединений PostgreSQL
+    public int POSTGRES_MAX_POOL_SIZE = 20; // максимальное количество соединений PostgreSQL
+
+
     // Новая структура для хранения множественных БД
     public Map<String, DatabaseConfig> DATABASES = new HashMap<>();
 
@@ -251,6 +257,9 @@ public final class ServerConstant {
         if (!GIT_URL.isEmpty()) {
             setupGitSync();
         }
+        setIntIfPresent(jsonConfig, "ORACLE_POOL_SIZE", val -> ORACLE_POOL_SIZE = val);
+        setIntIfPresent(jsonConfig, "POSTGRES_MIN_POOL_SIZE", val -> POSTGRES_MIN_POOL_SIZE = val);
+        setIntIfPresent(jsonConfig, "POSTGRES_MAX_POOL_SIZE", val -> POSTGRES_MAX_POOL_SIZE = val);
     }
 
     private void setIfPresent(JSONObject json, String key, StringConsumer setter) {

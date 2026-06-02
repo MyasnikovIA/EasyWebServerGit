@@ -889,7 +889,7 @@ public class OracleQuery {
     }
 
     public static Connection getConnect(DatabaseConfig dbConfig) {
-        return getConnect(dbConfig, DEFAULT_POOL_SIZE);
+        return getConnect(dbConfig, ServerConstant.config.ORACLE_POOL_SIZE);
     }
 
     private static String generatePoolKey(DatabaseConfig dbConfig) {
