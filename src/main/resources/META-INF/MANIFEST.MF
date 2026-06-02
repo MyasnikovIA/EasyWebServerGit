@@ -1,35 +1,3 @@
 Manifest-Version: 1.0
 Main-Class: ru.miacomsoft.Main
 
-
-
-https://jira-medmis.bars.group/browse/MEDOPDOHD-10019
-
-
-http://service-hospital.misng-med2dev.bars.group/api/v1/10903/histories/department/close/6343201?page=1&size=999999999
-
-
--------------------
-Вывести дату и время
-https://jira-medmis.bars.group/browse/MEDDEV-127985
-
-Определить логику вывода леч врачей
-https://jira-medmis.bars.group/browse/MEDDEV-127996
--------------------
-
-Дописать выбор isLast
-https://jira-medmis.bars.group/browse/MEDDEV-127985
-
-Оценить задачу Марата
-https://jira-medmis.bars.group/browse/MEDDEV-122323 
-
--------------------
-
-Jhawley/moonshotai-Kimi-K2-Instruct
-
-postProcessorDepList
-
-Form.postProcessorDepList
-
-
-https://rutube.ru/video/1d2ade09ee82aa510fef67744cbd2e85/

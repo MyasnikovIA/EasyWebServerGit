@@ -24,7 +24,10 @@ public class PacketManager {
     private static final String[] EXCLUDED_PACKAGES = {
             "org.", "com.ctc.wstx.osgi", "net.sf.",
             "com.lowagie.bouncycastle.", "com.lowagie.text.",
-            "net.sourceforge.barbecue."
+            "net.sourceforge.barbecue.",
+            "oracle.",
+            "javax.resource.",
+            "javax.transaction."
     };
 
     /**
@@ -85,8 +88,14 @@ public class PacketManager {
         try {
             Class<?> clazz = Class.forName(classNameShot);
             parseResourceClass(clazz);
-        } catch (ClassNotFoundException e) {
-            System.err.println("ClassNotFoundException error: " + e);
+        } catch (NoClassDefFoundError | ClassNotFoundException e) {
+            // Пропускаем классы с недостающими зависимостями
+            System.err.println("Skipping class (missing dependency): " + classNameShot);
+        } catch (UnsatisfiedLinkError e) {
+            // Пропускаем классы, требующие нативные библиотеки
+            System.err.println("Skipping class (native library required): " + classNameShot);
+        } catch (Exception e) {
+            System.err.println("Error loading class: " + classNameShot + " - " + e.getMessage());
         }
     }
 
@@ -274,6 +283,8 @@ public class PacketManager {
                     }
                 } catch (ClassNotFoundException e) {
                     System.err.println("ClassNotFoundException ERROR: " + e);
+                } catch (NoClassDefFoundError e) {
+                    System.err.println("NoClassDefFoundError (skipping): " + className + " - " + e.getMessage());
                 }
             }
         }

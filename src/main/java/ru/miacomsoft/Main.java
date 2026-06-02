@@ -6,11 +6,12 @@ import java.io.File;
 import java.net.URL;
 
 public class Main {
+
     public static void main(String[] args) {
         WebServer web = new WebServer(Main.class);
 
         // Основная БД (опционально)
-        web.config("DATABASE_NAME" , "jdbc:postgresql://localhost:5432/Panorama360");
+        web.config("DATABASE_NAME" , "jdbc:postgresql://192.168.241.36:5432/MisAnalis");
         web.config("DATABASE_USER_NAME" , "postgres");
         web.config("DATABASE_USER_PASS" , "postgres");
 
@@ -29,14 +30,17 @@ public class Main {
 
         String os = web.getOS();
         if (os.equals("windows")) {
-            web.config("WEBAPP_DIR", "Y:\\files\\home\\www;Y:\\files\\home\\storage\\downloads\\www");
+            web.config("WEBAPP_DIR", "C:\\AppServ\\www;Y:\\files\\home\\storage\\downloads\\www");
+            web.config("DEFAULT_PORT" , "9092");
         }
         if (os.equals("linux")) {
-            web.config("WEBAPP_DIR" , "/data/data/com.termux/files/home/www;/storage/emulated/0/Download/www");
+            // termux
+            //web.config("WEBAPP_DIR" , "/data/data/com.termux/files/home/www;/storage/emulated/0/Download/www");
+            web.config("WEBAPP_DIR" , "/var/www/EasyWebServerGit_www");
+            web.config("DEFAULT_PORT" , "80");
         }
 
         web.config("DEFAULT_HOST" , "0.0.0.0");
-        web.config("DEFAULT_PORT" , "9092");
         web.config("APP_NAME" , "webpage");
 
         try {
