@@ -104,14 +104,20 @@ public class cmpDataset_js {
             
                     // Получаем строку с атрибутом vars
                     var varsString = ctrlObj.getAttribute('vars');
-                    var jsonVars;
+                    var jsonVars = {};
             
+                    // Функция безопасного парсинга vars
                     function parseVarsString(str) {
                         var result = {};
+                        // Проверка на null/undefined и пустую строку
+                        if (!str || typeof str !== 'string') {
+                            return result;
+                        }
                         str = str.trim();
                         if (str.startsWith('{') && str.endsWith('}')) {
                             str = str.substring(1, str.length - 1);
                         }
+                        if (!str) return result;
             
                         var pairs = [];
                         var depth = 0;
@@ -168,58 +174,75 @@ public class cmpDataset_js {
                         jsonVars = parseVarsString(varsString);
                     } catch (e) {
                         console.error('Failed to parse vars attribute:', e);
-                        return;
+                        jsonVars = {};
                     }
             
                     var query_type = ctrlObj.getAttribute('query_type');
-                    var db = ctrlObj.getAttribute('db');
                     var dataset_name = ctrlObj.getAttribute('dataset_name');
-                    var database_name = ctrlObj.getAttribute('db');
-                    var db_type = ctrlObj.getAttribute('db_type');
-                    
+                    if (!dataset_name) {
+                        dataset_name = ctrlObj.getAttribute('name');
+                    }
+                    var pg_schema = ctrlObj.getAttribute('pg_schema') || 'public';
+                    var database_name = ctrlObj.getAttribute('db') || '';
+                    var db_type = ctrlObj.getAttribute('db_type') || '';
+            
                     // Формируем данные для отправки
                     var requestData = {};
             
                     for (var key in jsonVars) {
                         var varInfo = jsonVars[key];
-                        var value = '';
+                        if (!varInfo) continue;
             
-                        // Используем новый механизм D3Api для получения значений
-                        if (varInfo['srctype'] === 'var') {
+                        var value = '';
+                        var src = varInfo.src || key;
+                        var srctype = varInfo.srctype || 'var';
+                        var defaultVal = varInfo.defaultVal || '';
+            
+                        // Используем D3Api для получения значений
+                        if (srctype === 'var') {
                             if (window.D3Api && D3Api.getVar) {
-                                value = D3Api.getVar(varInfo['src']) || varInfo['defaultVal'] || '';
+                                value = D3Api.getVar(src) || defaultVal;
                             } else {
-                                value = window.getVar ? window.getVar(varInfo['src']) || varInfo['defaultVal'] || '' : '';
+                                value = window.getVar ? window.getVar(src) || defaultVal : defaultVal;
                             }
-                        } else if (varInfo['srctype'] === 'ctrl') {
+                        } else if (srctype === 'ctrl') {
                             if (window.D3Api && D3Api.getValue) {
-                                value = D3Api.getValue(varInfo['src']) || varInfo['defaultVal'] || '';
+                                value = D3Api.getValue(src) || defaultVal;
                             } else {
-                                var ctrlElement = document.querySelector('[name="' + varInfo['src'] + '"]');
-                                value = ctrlElement ? ctrlElement.value : (varInfo['defaultVal'] || '');
+                                var ctrlElement = document.querySelector('[name="' + src + '"]');
+                                value = ctrlElement ? ctrlElement.value : defaultVal;
                             }
-                        } else if (varInfo['srctype'] === 'session') {
+                        } else if (srctype === 'session') {
                             if (window.D3Api && D3Api.getSession) {
-                                value = D3Api.getSession(varInfo['src']) || varInfo['defaultVal'] || '';
+                                value = D3Api.getSession(src) || defaultVal;
                             } else {
-                                value = varInfo['defaultVal'] || '';
+                                value = defaultVal;
                             }
                         } else {
-                            value = varInfo['defaultVal'] || '';
+                            value = defaultVal;
                         }
             
                         requestData[key] = {
-                            'srctype': varInfo['srctype'],
-                            'src': varInfo['src'],
+                            'srctype': srctype,
+                            'src': src,
                             'value': String(value),
-                            'defaultVal': varInfo['defaultVal'] || ''
+                            'defaultVal': defaultVal
                         };
             
-                        if (varInfo['len']) {
-                            requestData[key]['len'] = varInfo['len'];
+                        if (varInfo.len) {
+                            requestData[key]['len'] = varInfo.len;
                         }
                     }
-                    fetch('/{component}/cmpDataset?query_type=' + query_type + '&dataset_name=' + dataset_name + '&pg_schema=' + ((ctrlObj.getAttribute('pg_schema') || 'public') + '&database_name='+database_name+'&db_type='+db_type), {
+            
+                    // Исправленный URL – корректное формирование параметров
+                    var url = '/{component}/cmpDataset' +
+                        '?query_type=' + encodeURIComponent(query_type) +
+                        '&dataset_name=' + encodeURIComponent(dataset_name) +
+                        '&pg_schema=' + encodeURIComponent(pg_schema) +
+                        '&database_name=' + encodeURIComponent(database_name) +
+                        '&db_type=' + encodeURIComponent(db_type);
+            
+                    fetch(url, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -238,42 +261,28 @@ public class cmpDataset_js {
                             return;
                         }
                         
-                            // Улучшенная обработка ошибок
-                            if (dataObj.ERROR) {
-                                console.error('Action error:', dataObj.ERROR);
-                
-                                // Если есть детальная информация об ошибке, показываем её
-                                if (typeof dataObj.ERROR === 'object') {
-                                    var errorMsg = dataObj.ERROR.message || 'Unknown error';
-                                    var errorHint = dataObj.ERROR.hint || '';
-                                    var fieldValue = dataObj.ERROR.field_value || '';
-                
-                                    // Формируем сообщение для пользователя
-                                    var userMessage = 'Ошибка выполнения действия: ' + errorMsg;
-                                    if (errorHint) {
-                                        userMessage += '\\n' + errorHint;
-                                    }
-                                    if (fieldValue) {
-                                        userMessage += '\\nЗначение поля: "' + fieldValue + '"';
-                                    }
-                
-                                    // Показываем сообщение пользователю
-                                    if (window.D3Api && D3Api.msgbox) {
-                                        D3Api.msgbox(userMessage, 'OK');
-                                    } else {
-                                        alert(userMessage);
-                                    }
+                        // Обработка ошибок
+                        if (dataObj.ERROR) {
+                            console.error('Dataset error:', dataObj.ERROR);
+                            if (typeof dataObj.ERROR === 'object') {
+                                var errorMsg = dataObj.ERROR.message || 'Unknown error';
+                                var userMessage = 'Ошибка выполнения датасета: ' + errorMsg;
+                                if (window.D3Api && D3Api.msgbox) {
+                                    D3Api.msgbox(userMessage, 'OK');
                                 } else {
-                                    // Простая ошибка в виде строки
-                                    var errorStr = String(dataObj.ERROR);
-                                    if (window.D3Api && D3Api.msgbox) {
-                                        D3Api.msgbox('Ошибка: ' + errorStr, 'OK');
-                                    } else {
-                                        alert('Ошибка: ' + errorStr);
-                                    }
+                                    alert(userMessage);
+                                }
+                            } else {
+                                var errorStr = String(dataObj.ERROR);
+                                if (window.D3Api && D3Api.msgbox) {
+                                    D3Api.msgbox('Ошибка: ' + errorStr, 'OK');
+                                } else {
+                                    alert('Ошибка: ' + errorStr);
                                 }
                             }
-                        // Обрабатываем выходные переменные через новый механизм D3Api
+                        }
+            
+                        // Обрабатываем выходные переменные
                         if (dataObj['vars_out']) {
                             var outVars = dataObj['vars_out'];
                             for (var key in outVars) {
@@ -322,6 +331,9 @@ public class cmpDataset_js {
                     })
                     .catch(function(error) {
                         console.error('Fetch error:', error);
+                        if (callBack && typeof callBack === 'function') {
+                            callBack({ error: error });
+                        }
                     });
                 };
             })();

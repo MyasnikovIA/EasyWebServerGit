@@ -631,7 +631,7 @@ public class PostgreActionHandler {
                 return s == null ? "" : s;
         }
     }
-
+    
     private static class PostgreVar {
         String name, src, srctype, len, defaultVal, type, direction;
     }
