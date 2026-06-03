@@ -92,32 +92,32 @@ public class cmpAction_js {
                         jsonVars = JSON.parse(fixedString);
                     } catch (e) {
                         try {
-                            var cleanStr = varsString.trim();
-                            if (cleanStr.startsWith('{') && cleanStr.endsWith('}')) {
-                                cleanStr = cleanStr.substring(1, cleanStr.length - 1);
-                            }
-            
+                            var cleanStr;
                             var pairs = [];
                             var depth = 0;
                             var current = '';
-            
-                            for (var i = 0; i < cleanStr.length; i++) {
-                                var c = cleanStr[i];
-            
-                                if (c === '{') depth++;
-                                else if (c === '}') depth--;
-            
-                                if (c === ',' && depth === 0) {
-                                    pairs.push(current);
-                                    current = '';
-                                } else {
-                                    current += c;
+                            if (varsString) {
+                                cleanStr = varsString.trim();
+                                if (cleanStr.startsWith('{') && cleanStr.endsWith('}')) {
+                                    cleanStr = cleanStr.substring(1, cleanStr.length - 1);
                                 }
-                            }
-                            if (current.trim()) {
-                                pairs.push(current);
-                            }
-            
+                                for (var i = 0; i < cleanStr.length; i++) {
+                                    var c = cleanStr[i];
+                
+                                    if (c === '{') depth++;
+                                    else if (c === '}') depth--;
+                
+                                    if (c === ',' && depth === 0) {
+                                        pairs.push(current);
+                                        current = '';
+                                    } else {
+                                        current += c;
+                                    }
+                                }
+                                if (current.trim()) {
+                                    pairs.push(current);
+                                }
+                            }            
                             for (var p = 0; p < pairs.length; p++) {
                                 var pair = pairs[p];
                                 var colonIndex = pair.indexOf(':');
@@ -210,7 +210,6 @@ public class cmpAction_js {
                         return response.json();
                     })
                     .then(function(dataObj) {
-                        
                         if (dataObj.redirect) {
                             if (window.saveDirect) {
                                 window.saveDirect('loginDirect');
