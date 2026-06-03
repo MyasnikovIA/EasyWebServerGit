@@ -109,7 +109,6 @@ public class cmpDataset_js {
                     // Функция безопасного парсинга vars
                     function parseVarsString(str) {
                         var result = {};
-                        // Проверка на null/undefined и пустую строку
                         if (!str || typeof str !== 'string') {
                             return result;
                         }
@@ -234,7 +233,6 @@ public class cmpDataset_js {
                         }
                     }
             
-                    // Исправленный URL – корректное формирование параметров
                     var url = '/{component}/cmpDataset' +
                         '?query_type=' + encodeURIComponent(query_type) +
                         '&dataset_name=' + encodeURIComponent(dataset_name) +
@@ -264,27 +262,18 @@ public class cmpDataset_js {
                         // Обработка ошибок
                         if (dataObj.ERROR) {
                             console.error('Dataset error:', dataObj.ERROR);
-                            if (typeof dataObj.ERROR === 'object') {
-                                var errorMsg = dataObj.ERROR.message || 'Unknown error';
-                                var userMessage = 'Ошибка выполнения датасета: ' + errorMsg;
-                                if (window.D3Api && D3Api.msgbox) {
-                                    D3Api.msgbox(userMessage, 'OK');
-                                } else {
-                                    alert(userMessage);
-                                }
+                            var errorMsg = typeof dataObj.ERROR === 'object' ? dataObj.ERROR.message : String(dataObj.ERROR);
+                            var userMessage = 'Ошибка выполнения датасета: ' + errorMsg;
+                            if (window.D3Api && D3Api.msgbox) {
+                                D3Api.msgbox(userMessage, 'OK');
                             } else {
-                                var errorStr = String(dataObj.ERROR);
-                                if (window.D3Api && D3Api.msgbox) {
-                                    D3Api.msgbox('Ошибка: ' + errorStr, 'OK');
-                                } else {
-                                    alert('Ошибка: ' + errorStr);
-                                }
+                                alert(userMessage);
                             }
                         }
             
-                        // Обрабатываем выходные переменные
-                        if (dataObj['vars_out']) {
-                            var outVars = dataObj['vars_out'];
+                        // ========== ИСПРАВЛЕНИЕ: поддержка vars и vars_out ==========
+                        var outVars = dataObj['vars_out'] || dataObj['vars'];
+                        if (outVars) {
                             for (var key in outVars) {
                                 var varInfo = outVars[key];
                                 var value = varInfo['value'];
@@ -314,6 +303,7 @@ public class cmpDataset_js {
                                 }
                             }
                         }
+                        // ========================================================
             
                         if (!window.D3Api || !D3Api.GLOBAL_DATA_SET) {
                             window.D3Api = window.D3Api || {};
