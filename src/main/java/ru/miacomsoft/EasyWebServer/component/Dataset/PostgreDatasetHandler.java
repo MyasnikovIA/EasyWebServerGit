@@ -142,35 +142,35 @@ public class PostgreDatasetHandler {
                 if (rs != null) {
                     ResultSetMetaData meta = rs.getMetaData();
                     int cols = meta.getColumnCount();
-                    // Если только одна колонка и её значение похоже на JSON-массив или объект
-                    while (rs.next()) {
-                        if (cols == 1) {
+
+                    // Если только одна колонка – считаем, что это JSON (массив или объект)
+                    if (cols == 1) {
+                        while (rs.next()) {
                             String value = rs.getString(1);
-                            if (value != null && (value.trim().startsWith("[") || value.trim().startsWith("{"))) {
+                            if (value != null && !value.isEmpty()) {
+                                // Пытаемся распарсить как JSON-массив
                                 try {
                                     JSONArray arr = new JSONArray(value);
                                     for (int i = 0; i < arr.length(); i++) {
                                         dataArray.put(arr.get(i));
                                     }
-                                } catch (Exception e1) {
-                                    // Если не массив, может быть объект
+                                } catch (Exception e) {
+                                    // Если не массив, пробуем как объект
                                     try {
                                         JSONObject obj = new JSONObject(value);
                                         dataArray.put(obj);
                                     } catch (Exception e2) {
-                                        // Иначе добавляем как есть
+                                        // Иначе добавляем как есть (оборачиваем в объект с ключом "value")
                                         JSONObject row = new JSONObject();
-                                        row.put(meta.getColumnLabel(1), value);
+                                        row.put("value", value);
                                         dataArray.put(row);
                                     }
                                 }
-                            } else {
-                                JSONObject row = new JSONObject();
-                                row.put(meta.getColumnLabel(1), value);
-                                dataArray.put(row);
                             }
-                        } else {
-                            // Несколько колонок – строим обычную строку
+                        }
+                    } else {
+                        // Несколько колонок – обычный ResultSet
+                        while (rs.next()) {
                             JSONObject row = new JSONObject();
                             for (int i = 1; i <= cols; i++) {
                                 row.put(meta.getColumnLabel(i), rs.getObject(i));
@@ -197,7 +197,7 @@ public class PostgreDatasetHandler {
                         }
                     }
                 } catch (SQLException e) {
-                    // Нет параметра – игнорируем
+                    // Нет выходного параметра – игнорируем
                 }
             }
 

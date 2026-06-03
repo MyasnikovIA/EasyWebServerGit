@@ -59,7 +59,7 @@ public class cmpDataset extends Base {
         result.put("vars", vars);
 
         if ("java".equals(params.queryType)) {
-            JavaDatasetHandler.INSTANCE.executeJavaDataset(query, result, params.datasetName, vars, query.session);
+            JavaDatasetHandler.INSTANCE.executeJavaDataset(query, result, params.datasetName, vars, query.session, params.debugMode);
             return result.toString().getBytes();
         }
 

@@ -64,7 +64,7 @@ public class JavaDatasetHandler {
     }
 
     public void executeJavaDataset(HttpExchange query, JSONObject result, String datasetName,
-                                   JSONObject vars, Map<String, Object> session) {
+                                   JSONObject vars, Map<String, Object> session, boolean debugMode) {
         System.out.println("=== executeJavaDataset: " + datasetName + " ===");
         HashMap<String, Object> param = procedureList.get(datasetName);
         if (param == null) {
@@ -109,6 +109,9 @@ public class JavaDatasetHandler {
 
         if (res.has("JAVA_ERROR")) {
             result.put("ERROR", res.get("JAVA_ERROR"));
+            if (debugMode && param.containsKey("JAVA_CODE")) {
+                result.put("java_code", param.get("JAVA_CODE"));
+            }
         } else {
             result.put("data", dataRes);
             // Обновляем vars, если есть выходные переменные
@@ -128,6 +131,9 @@ public class JavaDatasetHandler {
                 }
             }
             result.put("vars", vars);
+            if (debugMode && param.containsKey("JAVA_CODE")) {
+                result.put("java_code", param.get("JAVA_CODE"));
+            }
         }
     }
 
