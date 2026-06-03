@@ -12,6 +12,7 @@ import ru.miacomsoft.EasyWebServer.HttpExchange;
 import ru.miacomsoft.EasyWebServer.OracleQuery;
 import ru.miacomsoft.EasyWebServer.ServerConstant;
 import ru.miacomsoft.EasyWebServer.ServerResourceHandler;
+import ru.miacomsoft.EasyWebServer.JavaStrExecut;
 
 import java.math.BigDecimal;
 import java.sql.*;
@@ -64,11 +65,93 @@ public class cmpAction extends Base {
 
         if (config.isOracle) {
             handleOracleAction(doc, element, config);
+        } else if ("java".equals(config.queryType)) {
+            // НОВЫЙ ФУНКЦИОНАЛ: Обработка Java действия
+            handleJavaAction(doc, element, config);
         } else {
             handlePostgreAction(doc, element, config);
         }
 
         attachJavaScriptLibrary(doc, config.name);
+    }
+
+    // ======================== НОВЫЙ МЕТОД: JAVA ACTION ========================
+    private void handleJavaAction(Document doc, Element element, ActionConfig config) {
+        System.out.println("Java mode: " + config.name);
+
+        List<ActionVar> variables = parseVariables(element);
+        String javaCode = element.hasText() ? element.text().trim() : "";
+
+        // Генерация имени функции для Java (без префикса APP_NAME)
+        String functionName = generateJavaFunctionName(config);
+
+        // Сбор импортов и jar ресурсов
+        ArrayList<String> jarResourse = new ArrayList<>();
+        ArrayList<String> importPacket = new ArrayList<>();
+
+        for (Element child : element.children()) {
+            String tagName = child.tag().toString().toLowerCase();
+            if (tagName.contains("import")) {
+                Attributes attrsItem = child.attributes();
+                if (attrsItem.hasKey("path")) {
+                    jarResourse.add(attrsItem.get("path"));
+                }
+                if (attrsItem.hasKey("packet")) {
+                    importPacket.add(attrsItem.get("packet"));
+                }
+            }
+        }
+
+        // Компиляция Java кода (JavaStrExecut сам добавит APP_NAME)
+        JSONObject infoCompile = new JSONObject();
+        JavaStrExecut javaStrExecut = new JavaStrExecut();
+
+        if (!javaStrExecut.compile(functionName, importPacket, jarResourse, javaCode, infoCompile)) {
+            element.empty();
+            element.append(JavaStrExecut.parseErrorCompile(infoCompile));
+            element.removeAttr("style");
+            return;
+        }
+
+        // Полное имя под которым функция сохранена в JavaStrExecut
+        String fullFunctionName = ServerConstant.config.APP_NAME + "_" + functionName;
+
+        // Сохраняем метаданные
+        HashMap<String, Object> param = createBaseParam(variables, config);
+        param.put("JAVA_CODE", javaCode);
+        param.put("FUNCTION_NAME", fullFunctionName);
+        param.put("query_type", "java");
+
+        // Сохраняем в кэш под коротким и полным именем
+        procedureList.put(config.name, param);
+        procedureList.put(fullFunctionName, param);
+
+        System.out.println("Java action compiled: " + config.name + " -> " + fullFunctionName);
+
+        setJavaComponentAttributes(element, config, variables, functionName);
+        finalizeElement(element, config);
+    }
+
+    private String generateJavaFunctionName(ActionConfig config) {
+        String relativePath = getRelativePath(config.docPath, config.rootPath);
+        String pathHash = getMd5Hash(relativePath);
+        if (pathHash.length() > 8) pathHash = pathHash.substring(0, 8);
+        if (pathHash.length() > 0 && Character.isDigit(pathHash.charAt(0))) pathHash = "f" + pathHash;
+
+        String baseName = pathHash + "_java_" + config.name;
+        if (baseName.length() > 60) baseName = baseName.substring(0, 60);
+        if (baseName.length() > 0 && Character.isDigit(baseName.charAt(0))) baseName = "f_" + baseName;
+
+        return baseName.toLowerCase();
+    }
+
+    private void setJavaComponentAttributes(Element element, ActionConfig config, List<ActionVar> variables, String functionName) {
+        element.attr("style", "display:none");
+        element.attr("action_name", functionName);
+        element.attr("name", config.name);
+        element.attr("vars", buildVarsJson(variables));
+        element.attr("query_type", "java");
+        element.attr("db", config.dbName);
     }
 
     // ======================== КОНФИГУРАЦИЯ ========================
@@ -488,7 +571,6 @@ public class cmpAction extends Base {
     private void finalizeElement(Element element, ActionConfig config) {
         element.empty();
 
-
         // Сохраняем атрибуты
         this.attr("query_type", config.queryType);
         this.attr("db_type", config.dbType);
@@ -745,6 +827,7 @@ public class cmpAction extends Base {
         JSONObject result = new JSONObject();
         result.put("vars", vars);
 
+        // НОВЫЙ ФУНКЦИОНАЛ: Обработка Java действия во время выполнения
         if ("java".equals(params.queryType)) {
             executeJavaAction(query, result, params.actionName, vars, query.session);
             return result.toString().getBytes();
@@ -881,42 +964,95 @@ public class cmpAction extends Base {
         return requestDbName;
     }
 
-    // ======================== JAVA ACTION ========================
+    // ======================== JAVA ACTION (ВЫПОЛНЕНИЕ) ========================
+    /**
+     * НОВЫЙ МЕТОД: Выполнение Java действия через JavaStrExecut
+     */
     private static void executeJavaAction(HttpExchange query, JSONObject result, String actionName,
                                           JSONObject vars, Map<String, Object> session) {
-        JSONObject callVars = new JSONObject();
-        Iterator<String> keys = vars.keys();
+        System.out.println("=== executeJavaAction: " + actionName + " ===");
 
-        while (keys.hasNext()) {
-            String key = keys.next();
-            Object val = vars.get(key);
-            if (val instanceof JSONObject) {
-                JSONObject obj = (JSONObject) val;
-                String value = obj.optString("value", obj.optString("defaultVal", ""));
-                callVars.put(key, value);
-            } else {
-                callVars.put(key, val.toString());
+        HashMap<String, Object> param = procedureList.get(actionName);
+        if (param == null) {
+            result.put("ERROR", "Java action not found: " + actionName);
+            return;
+        }
+
+        String fullFunctionName = (String) param.get("FUNCTION_NAME");
+        if (fullFunctionName == null) {
+            result.put("ERROR", "FUNCTION_NAME missing for: " + actionName);
+            return;
+        }
+
+        // Подготовка входных переменных для Java-функции
+        JSONObject callVars = new JSONObject();
+        List<String> varNames = (List<String>) param.get("vars");
+        if (varNames != null) {
+            for (String varName : varNames) {
+                String value = "";
+                if (vars.has(varName)) {
+                    JSONObject varObj = vars.getJSONObject(varName);
+                    String srctype = varObj.optString("srctype", "var");
+                    String src = varObj.optString("src", varName);
+
+                    if ("session".equals(srctype)) {
+                        Object sessionVal = session.get(src);
+                        value = sessionVal != null ? sessionVal.toString() : varObj.optString("defaultVal", "");
+                    } else if ("ctrl".equals(srctype)) {
+                        // Получаем значение из элемента DOM
+                        // ВНИМАНИЕ: это выполняется на сервере, где нет DOM!
+                        // Для ctrl нужно, чтобы клиент передал текущее значение элемента в запросе.
+                        // Клиент должен отправить значение поля в vars.
+                        // Поэтому здесь просто берём из переданных vars значение поля "value"
+                        value = varObj.optString("value", varObj.optString("defaultVal", ""));
+                    } else { // "var"
+                        value = varObj.optString("value", varObj.optString("defaultVal", ""));
+                    }
+                } else {
+                    // Если переменная не описана в vars, но есть defaultVal
+                    if (param.containsKey("defaults")) {
+                        // можно взять из defaults, но пока пусто
+                    }
+                }
+                callVars.put(varName, value);
+            }
+        } else {
+            // Если нет объявленных переменных, берём все из vars как есть
+            Iterator<String> keys = vars.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                Object val = vars.get(key);
+                if (val instanceof JSONObject) {
+                    JSONObject obj = (JSONObject) val;
+                    callVars.put(key, obj.optString("value", obj.optString("defaultVal", "")));
+                } else {
+                    callVars.put(key, val.toString());
+                }
             }
         }
 
-        JSONObject res = ServerResourceHandler.javaStrExecut.runFunction(actionName, callVars, session, null);
+        System.out.println("Calling Java with: " + callVars);
+
+        JavaStrExecut javaStrExecut = new JavaStrExecut();
+        JSONObject res = javaStrExecut.runFunction(fullFunctionName, callVars, session, null);
 
         if (res.has("JAVA_ERROR")) {
             result.put("ERROR", res.get("JAVA_ERROR"));
         } else {
-            keys = res.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                if (!"JAVA_ERROR".equals(key)) {
-                    if (vars.has(key) && vars.get(key) instanceof JSONObject) {
-                        vars.getJSONObject(key).put("value", res.get(key).toString());
-                    } else {
-                        JSONObject wrapper = new JSONObject();
-                        wrapper.put("value", res.get(key).toString());
-                        wrapper.put("src", key);
-                        wrapper.put("srctype", "var");
-                        vars.put(key, wrapper);
+            // Обновляем выходные переменные
+            if (varNames != null) {
+                for (String varName : varNames) {
+                    if (res.has(varName)) {
+                        String outValue = res.get(varName).toString();
+                        updateVars(vars, session, varName, outValue);
                     }
+                }
+            } else {
+                Iterator<String> keys = res.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    String outValue = res.get(key).toString();
+                    updateVars(vars, session, key, outValue);
                 }
             }
             result.put("vars", vars);
