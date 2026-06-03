@@ -8,6 +8,8 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import ru.miacomsoft.EasyWebServer.ServerConstant;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.UUID;
 
 
@@ -204,5 +206,43 @@ public class Base extends Element {
             }
         }
         return sb.toString();
+    }
+    /**
+     * Вычисляет MD5 хэш от содержимого элемента
+     */
+    public static String getContentHash(Element element) {
+        if (element == null || !element.hasText()) {
+            return "";
+        }
+        String content = element.text().trim();
+        return getMd5Hash(content);
+    }
+
+    /**
+     * Вычисляет MD5 хэш от строки
+     */
+    public static String getMd5Hash(String input) {
+        if (input == null || input.isEmpty()) {
+            return "empty";
+        }
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return String.valueOf(input.hashCode());
+        }
+    }
+
+    /**
+     * Получает короткий хэш (8 символов)
+     */
+    public static String getShortHash(String input) {
+        String hash = getMd5Hash(input);
+        return hash.length() > 8 ? hash.substring(0, 8) : hash;
     }
 }

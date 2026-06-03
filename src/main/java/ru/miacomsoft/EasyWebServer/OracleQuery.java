@@ -80,12 +80,29 @@ public class OracleQuery {
         String host = dbConfig.getHost();
         String port = dbConfig.getPort();
         String database = dbConfig.getDatabase();
+        String connectionType = dbConfig.getParams().get("connectionType");
 
         if (port == null || port.trim().isEmpty()) {
             port = "1521";
         }
 
-        return "jdbc:oracle:thin:@" + host + ":" + port + ":" + database;
+        // Убираем :pooled если есть в database
+        if (database != null && database.endsWith(":pooled")) {
+            database = database.substring(0, database.length() - 7);
+        }
+
+        // Если указан параметр connectionType=service или database содержит '/'
+        if ("service".equals(connectionType) || (database != null && database.contains("/"))) {
+            // Service Name format
+            String serviceName = database;
+            if (serviceName.contains("/")) {
+                serviceName = serviceName.split("/")[0];
+            }
+            return "jdbc:oracle:thin:@//" + host + ":" + port + "/" + serviceName;
+        } else {
+            // SID format
+            return "jdbc:oracle:thin:@" + host + ":" + port + ":" + database;
+        }
     }
 
     /**
@@ -889,6 +906,10 @@ public class OracleQuery {
     }
 
     public static Connection getConnect(DatabaseConfig dbConfig) {
+        System.out.println("=== OracleQuery.getConnect called ===");
+        System.out.println("dbConfig type: " + dbConfig.getType());
+        System.out.println("dbConfig host: " + dbConfig.getHost());
+        System.out.println("dbConfig database: " + dbConfig.getDatabase());
         return getConnect(dbConfig, ServerConstant.config.ORACLE_POOL_SIZE);
     }
 

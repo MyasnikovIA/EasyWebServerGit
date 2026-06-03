@@ -47,6 +47,7 @@ public class DatabaseConfig implements Serializable {
     /**
      * Парсит строку подключения в формате:
      * oci8://user:pass@host:port/database:pooled?param=value
+     * oci8://user:pass@host/database:pooled?param=value
      * pdo://user:pass@host:port/database?currentSchema=schema&type=pgsql
      */
     public static DatabaseConfig parse(String connectionString) {
@@ -79,7 +80,7 @@ public class DatabaseConfig implements Serializable {
                 config.password = userPassParts[1];
             }
 
-            // Оставшаяся часть: host:port/database?params
+            // Оставшаяся часть: host:port/database?params или host/database?params
             String hostPortDb = rest.substring(atIndex + 1);
 
             // Парсим параметры после ?
@@ -101,28 +102,38 @@ public class DatabaseConfig implements Serializable {
                         if ("currentSchema".equals(keyValue[0])) {
                             config.schema = keyValue[1];
                         }
+                        if ("type".equals(keyValue[0]) && "pgsql".equals(keyValue[1])) {
+                            config.type = "pdo";
+                        }
                     }
                 }
             }
 
-            // Парсим host:port/database
+            // Парсим host:port/database или host/database
+            // Убираем :pooled если есть
+            if (hostPortDb.endsWith(":pooled")) {
+                hostPortDb = hostPortDb.substring(0, hostPortDb.length() - 7);
+            }
+
             String[] hostPortDbParts = hostPortDb.split("/", 2);
             String hostPort = hostPortDbParts[0];
             if (hostPortDbParts.length > 1) {
-                String dbPart = hostPortDbParts[1];
-                // Убираем :pooled если есть
-                int colonIndex = dbPart.indexOf(":");
-                if (colonIndex >= 0) {
-                    config.database = dbPart.substring(0, colonIndex);
-                } else {
-                    config.database = dbPart;
-                }
+                config.database = hostPortDbParts[1];
             }
 
-            String[] hostPortParts = hostPort.split(":", 2);
-            config.host = hostPortParts[0];
-            if (hostPortParts.length > 1) {
+            // Парсим host и port
+            if (hostPort.contains(":")) {
+                String[] hostPortParts = hostPort.split(":", 2);
+                config.host = hostPortParts[0];
                 config.port = hostPortParts[1];
+            } else {
+                config.host = hostPort;
+                // Для Oracle порт по умолчанию 1521, для PostgreSQL 5432
+                if ("oci8".equals(config.type)) {
+                    config.port = "1521";
+                } else {
+                    config.port = "5432";
+                }
             }
 
             // Устанавливаем драйвер по умолчанию
