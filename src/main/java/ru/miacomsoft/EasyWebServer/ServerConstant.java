@@ -410,22 +410,9 @@ public final class ServerConstant {
      */
     public DatabaseConfig getDatabaseConfig(String dbName) {
         if (dbName == null || dbName.isEmpty() || "default".equals(dbName)) {
-            // Сначала ищем БД с именем "default"
-            if (DATABASES.containsKey("default")) {
-                return DATABASES.get("default");
-            }
-            // Если нет default, берем первую из списка
-            if (!DATABASES.isEmpty()) {
-                return DATABASES.values().iterator().next();
-            }
-            // Если нет дополнительных БД, используем основную
-            if (DATABASE_NAME != null && !DATABASE_NAME.isEmpty()) {
-                return new DatabaseConfig("jdbc", DATABASE_USER_NAME, DATABASE_USER_PASS,
-                        parseJdbcUrl(DATABASE_NAME));
-            }
-            return null;
+            // Возвращаем только явно объявленную "default", а не первую попавшуюся
+            return DATABASES.get("default");
         }
-
         return DATABASES.get(dbName);
     }
 

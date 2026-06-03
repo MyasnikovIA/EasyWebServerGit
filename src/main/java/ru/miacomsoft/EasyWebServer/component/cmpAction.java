@@ -488,6 +488,41 @@ public class cmpAction extends Base {
         boolean isOracle = false;
 
         if (query_type.equals("sql")) {
+// Если запрошена БД "default", а в конфигурации нет ключа "default", создаём конфигурацию PostgreSQL из основных параметров
+            if ((dbName.equals("default") || dbName.equals("db")) && !ServerConstant.config.DATABASES.containsKey("default")) {
+                String url = ServerConstant.config.DATABASE_NAME;
+                String user = ServerConstant.config.DATABASE_USER_NAME;
+                String pass = ServerConstant.config.DATABASE_USER_PASS;
+                if (url != null && !url.isEmpty() && user != null && !user.isEmpty()) {
+                    try {
+                        DatabaseConfig defaultPgConfig = new DatabaseConfig();
+                        defaultPgConfig.setType("jdbc");
+                        defaultPgConfig.setDriver("org.postgresql.Driver");
+                        // Парсим JDBC URL: jdbc:postgresql://host:port/database
+                        String withoutProtocol = url.substring(url.indexOf("://") + 3);
+                        String[] parts = withoutProtocol.split("/", 2);
+                        String hostPort = parts[0];
+                        String database = parts.length > 1 ? parts[1] : "postgres";
+                        String[] hp = hostPort.split(":");
+                        String host = hp[0];
+                        String port = hp.length > 1 ? hp[1] : "5432";
+                        defaultPgConfig.setHost(host);
+                        defaultPgConfig.setPort(port);
+                        defaultPgConfig.setDatabase(database);
+                        defaultPgConfig.setUsername(user);
+                        defaultPgConfig.setPassword(pass);
+                        defaultPgConfig.setSchema("public");
+                        // Добавляем в общий реестр
+                        ServerConstant.config.DATABASES.put("default", defaultPgConfig);
+                        System.out.println("Auto-created default PostgreSQL config: " + host + ":" + port + "/" + database);
+                    } catch (Exception e) {
+                        System.err.println("Failed to create default PostgreSQL config: " + e.getMessage());
+                    }
+                } else {
+                    System.err.println("WARNING: No default database configuration and DATABASE_NAME/DATABASE_USER_NAME not set");
+                }
+            }
+
             dbConfig = ServerConstant.config.getDatabaseConfig(dbName.equals("db") ? null : dbName.toLowerCase());
 
             if (attrs.hasKey("schema")) {

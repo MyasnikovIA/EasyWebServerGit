@@ -16,14 +16,13 @@ public class Main {
         WebServer web = new WebServer(Main.class);
 
         // Основная БД (опционально)
-        web.config("DATABASE_NAME" , "jdbc:postgresql://192.168.241.36:5432/MisAnalis");
-        web.config("DATABASE_USER_NAME" , "postgres");
-        web.config("DATABASE_USER_PASS" , "postgres");
+        web.config("DATABASE_NAME", "jdbc:postgresql://192.168.241.36:5432/Panorama360");
+        web.config("DATABASE_USER_NAME", "postgres");
+        web.config("DATABASE_USER_PASS", "postgres");
 
         // Дополнительные БД
         web.config("DATABASES.oracle_test","oci8://dev:def@192.168.241.141:1521/med2dev:pooled");
         web.config("DATABASES.oracle_sid","oci8://dev:def@192.168.241.141:1521:med2dev:pooled");
-        web.config("DATABASES.settings", "pdo://postgres:postgres@192.168.241.36:5432/mis?type=pgsql");
 
         web.config("LOGIN_PAGE" , "login.html");
         web.config("PAGE_404" , "page_404.html");
@@ -57,6 +56,9 @@ public class Main {
 
         web.config("DEFAULT_HOST" , "0.0.0.0");
         web.config("APP_NAME" , "webpage");
+
+        web.config("DEBUG", "true");
+        web.config("CAHEBLE", "true");
 
         try {
             URL location = Main.class.getProtectionDomain().getCodeSource().getLocation();
