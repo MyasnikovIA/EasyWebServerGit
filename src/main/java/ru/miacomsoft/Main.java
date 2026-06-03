@@ -37,7 +37,6 @@ public class Main {
         web.config("POSTGRES_MIN_POOL_SIZE", "5");
         web.config("POSTGRES_MAX_POOL_SIZE", "30");
 
-
        // // Настройка HTTPS
        // web.config("HTTPS_PORT", "443");
        // // Для production - используйте настоящий сертификат

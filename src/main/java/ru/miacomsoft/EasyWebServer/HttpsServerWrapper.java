@@ -41,8 +41,9 @@ public class HttpsServerWrapper {
     }
 
 
-    // Упрощенная версия - только для production с настоящим сертификатом
+
     public HttpsServerWrapper(int httpsPort, String keyStorePath, String keyStorePassword, String keyPassword,boolean isProd) throws Exception {
+        // Упрощенная версия - только для production с настоящим сертификатом
         this.httpsPort = httpsPort;
 
         KeyStore keyStore = KeyStore.getInstance("JKS");
