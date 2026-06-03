@@ -150,6 +150,9 @@ public class cmpAction_js {
             
                     var query_type = ctrlObj.getAttribute('query_type') || 'java';
                     var action_name = ctrlObj.getAttribute('action_name');
+                    if (!action_name) { 
+                        action_name = ctrlObj.getAttribute('name')
+                    } 
                     var pg_schema = ctrlObj.getAttribute('pg_schema') || 'public';
                     // Формируем данные для отправки
                     var requestData = {};
