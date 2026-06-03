@@ -128,16 +128,23 @@ public class cmpAction extends Base {
     }
 
     private DatabaseConfig getDatabaseConfiguration(ActionConfig config) {
+        System.out.println("getDatabaseConfiguration for dbName: " + config.dbName);
         if (config.dbName.equals("default") || config.dbName.equals("db")) {
             DatabaseConfig dbConfig = ServerConstant.config.DATABASES.get("default");
             if (dbConfig == null) {
-                // Делегируем создание дефолтной конфигурации PostgreSQL обработчику
+                System.out.println("No default DB config, creating via PostgreActionHandler");
                 dbConfig = PostgreActionHandler.INSTANCE.createDefaultPostgresConfig();
+                if (dbConfig == null) {
+                    System.err.println("ERROR: Failed to create default PostgreSQL config");
+                } else {
+                    System.out.println("Default config created: " + dbConfig.getHost() + ":" + dbConfig.getPort() + "/" + dbConfig.getDatabase());
+                }
             }
             return dbConfig;
         }
         return ServerConstant.config.getDatabaseConfig(config.dbName.toLowerCase());
     }
+
 
     private static RequestParams parseRequestParams(HttpExchange query) {
         RequestParams params = new RequestParams();

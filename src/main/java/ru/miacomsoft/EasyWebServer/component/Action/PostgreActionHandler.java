@@ -38,8 +38,12 @@ public class PostgreActionHandler {
 
     // ========== ИНИЦИАЛИЗАЦИЯ ==========
     public void handlePostgreAction(Document doc, Element element, cmpAction.ActionConfig config, Base base) {
+        System.out.println("=== handlePostgreAction called for: " + config.name);
         if (config.dbConfig == null) {
             System.err.println("Database config not found for: " + config.dbName);
+            element.empty();
+            element.append("Database configuration not found for: " + config.dbName);
+            element.removeAttr("style");
             return;
         }
         this.debugMode = (doc != null && doc.hasAttr("debug_mode") && Boolean.parseBoolean(doc.attr("debug_mode")));
@@ -58,11 +62,18 @@ public class PostgreActionHandler {
         List<PostgreVar> variables = parseVariables(element);
         setComponentAttributes(config, functionName, variables);
 
+        HashMap<String, Object> param = null;
         if (needsRecreation(fullFunctionName, contentHash, config)) {
-            createPostgresProcedure(fullFunctionName, config, functionName, sqlContent, element, doc, variables, contentHash);
+            param = createPostgresProcedure(fullFunctionName, config, functionName, sqlContent, element, doc, variables, contentHash);
             updateFunctionHashCache(fullFunctionName, contentHash);
         } else {
-            loadExistingProcedureToCache(fullFunctionName, config.schema, element);
+            param = loadExistingProcedureToCache(fullFunctionName, config.schema, element);
+        }
+
+        // Сохраняем под исходным именем действия (config.name) для поиска
+        if (param != null) {
+            procedureList.put(config.name, param);
+            System.out.println("Saved action under original name: " + config.name);
         }
 
         finalizeElement(element, config, base);
@@ -141,7 +152,7 @@ public class PostgreActionHandler {
         }
     }
 
-    // ========== МЕТОДЫ РАБОТЫ С POSTGRESQL (БД, СХЕМЫ, ПРОЦЕДУРЫ) ==========
+    // ========== МЕТОДЫ РАБОТЫ С POSTGRESQL ==========
     public DatabaseConfig createDefaultPostgresConfig() {
         String url = ServerConstant.config.DATABASE_NAME;
         String user = ServerConstant.config.DATABASE_USER_NAME;
@@ -183,11 +194,11 @@ public class PostgreActionHandler {
         }
     }
 
-    private void createPostgresProcedure(String fullFunctionName, cmpAction.ActionConfig config, String procName,
-                                         String sqlContent, Element element, Document doc,
-                                         List<PostgreVar> variables, String contentHash) {
+    private HashMap<String, Object> createPostgresProcedure(String fullFunctionName, cmpAction.ActionConfig config, String procName,
+                                                            String sqlContent, Element element, Document doc,
+                                                            List<PostgreVar> variables, String contentHash) {
         Connection conn = connectToPostgres(config.dbConfig);
-        if (conn == null) return;
+        if (conn == null) return null;
         String cleanName = sanitizeProcedureName(procName);
         String signature = buildProcedureSignature(config.schema, cleanName, variables);
         String body = buildProcedureBody(sqlContent, contentHash, element, doc);
@@ -195,14 +206,18 @@ public class PostgreActionHandler {
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("DROP PROCEDURE IF EXISTS " + config.schema + "." + cleanName + " CASCADE");
             stmt.execute(fullSQL);
-            saveProcedureToCache(fullFunctionName, config.schema, cleanName, variables, sqlContent, contentHash, conn);
-        } catch (SQLException e) { e.printStackTrace(); }
-        finally { closeConnectionQuietly(conn); }
+            return saveProcedureToCache(fullFunctionName, config.schema, cleanName, variables, sqlContent, contentHash, conn, config.name);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return null;
+        } finally {
+            closeConnectionQuietly(conn);
+        }
     }
 
-    private void saveProcedureToCache(String fullName, String schema, String procName,
-                                      List<PostgreVar> variables, String sqlContent,
-                                      String contentHash, Connection conn) {
+    private HashMap<String, Object> saveProcedureToCache(String fullName, String schema, String procName,
+                                                         List<PostgreVar> variables, String sqlContent,
+                                                         String contentHash, Connection conn, String actionName) {
         HashMap<String, Object> param = createBaseParam(variables, null);
         param.put("SQL", sqlContent);
         param.put("dbConfig", currentDbConfig);
@@ -216,9 +231,11 @@ public class PostgreActionHandler {
         param.put("prepareCall", "CALL " + schema + "." + procName + "(" + placeholders.toString() + ")");
         procedureList.put(fullName, param);
         procedureList.put(procName, param);
+        procedureList.put(actionName, param); // сохраняем под исходным именем действия
+        return param;
     }
 
-    private void loadExistingProcedureToCache(String fullName, String schema, Element element) {
+    private HashMap<String, Object> loadExistingProcedureToCache(String fullName, String schema, Element element) {
         List<PostgreVar> variables = parseVariables(element);
         HashMap<String, Object> param = createBaseParam(variables, null);
         param.put("SQL", element.hasText() ? element.text().trim() : "");
@@ -232,6 +249,8 @@ public class PostgreActionHandler {
         param.put("prepareCall", "CALL " + schema + "." + procName + "(" + placeholders.toString() + ")");
         procedureList.put(fullName, param);
         procedureList.put(procName, param);
+        // здесь actionName не передаётся, но позже в handlePostgreAction добавим под именем config.name
+        return param;
     }
 
     // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (парсинг, кэширование, утилиты) ==========
@@ -278,7 +297,7 @@ public class PostgreActionHandler {
     }
 
     private void setComponentAttributes(cmpAction.ActionConfig config, String functionName, List<PostgreVar> variables) {
-        // атрибуты устанавливаются через element в вызывающем коде, но для совместимости оставим пустой метод
+        // Не используется, атрибуты устанавливаются через element в handlePostgreAction
     }
 
     private void finalizeElement(Element element, cmpAction.ActionConfig config, Base base) {
