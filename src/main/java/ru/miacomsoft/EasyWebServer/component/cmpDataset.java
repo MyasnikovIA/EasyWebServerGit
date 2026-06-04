@@ -188,7 +188,6 @@ public class cmpDataset extends Base {
     private static RequestParams parseRequestParams(HttpExchange query) {
         RequestParams params = new RequestParams();
         JSONObject qp = query.requestParam;
-        params.queryType = qp.optString("query_type", "sql");
         String datasetName = qp.optString("dataset_name", "");
         if ("null".equals(datasetName)) datasetName = "";
         params.datasetName = datasetName;
@@ -196,6 +195,14 @@ public class cmpDataset extends Base {
         params.dbName = qp.optString("db", "DB");
         params.dbType = qp.optString("db_type", "jdbc");
         params.debugMode = query.session != null && query.session.containsKey("debug_mode") && (boolean) query.session.get("debug_mode");
+
+        // Определяем query_type по наличию в кэшах
+        if (JavaDatasetHandler.INSTANCE.procedureList.containsKey(datasetName)) {
+            params.queryType = "java";
+        } else {
+            params.queryType = qp.optString("query_type", "sql");
+        }
+
         return params;
     }
 
