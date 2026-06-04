@@ -252,7 +252,7 @@ public class PostgreActionHandler {
     private void executeProcedure(HttpExchange query, JSONObject result, HashMap<String, Object> param,
                                   JSONObject vars, Map<String, Object> session, boolean debugMode) {
         String schema = (String) param.get("schema");
-        String procedureName = (String) param.get("procedureName");  // ИЗМЕНИТЬ - брать из param
+        String procedureName = (String) param.get("procedureName");
         if (procedureName == null) {
             procedureName = (String) param.get("dbName");
         }
@@ -282,15 +282,22 @@ public class PostgreActionHandler {
 
             setSearchPath(conn, schema);
 
-            // ИСПРАВЛЕНО: используем правильное имя процедуры
+            // Если в имени процедуры есть точка, используем как есть, иначе добавляем схему
+            String fullProcedureName;
+            if (procedureName.contains(".")) {
+                fullProcedureName = procedureName;
+            } else {
+                fullProcedureName = schema + "." + procedureName;
+            }
+
             StringBuilder placeholders = new StringBuilder();
             for (int i = 0; i < variables.size(); i++) {
                 if (i > 0) placeholders.append(",");
                 placeholders.append("?");
             }
 
-            String callSql = "CALL " + schema + "." + procedureName + "(" + placeholders.toString() + ")";
-            System.out.println("Call SQL: " + callSql);  // ДЛЯ ОТЛАДКИ
+            String callSql = "CALL " + fullProcedureName + "(" + placeholders.toString() + ")";
+            System.out.println("Call SQL: " + callSql);
 
             cs = conn.prepareCall(callSql);
 

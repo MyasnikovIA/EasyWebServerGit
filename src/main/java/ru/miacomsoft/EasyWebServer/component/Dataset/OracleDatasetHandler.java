@@ -75,7 +75,7 @@ public class OracleDatasetHandler {
         System.out.println("Oracle dataset cached (not created yet): " + name);
     }
 
-    // ========== ВЫПОЛНЕНИЕ (С ЛЕНИВЫМ СОЗДАНИЕМ ФУНКЦИИ) ==========
+    // ========== ВЫПОЛНЕНИЕ (ПРЯМОЕ ВЫПОЛНЕНИЕ SQL, БЕЗ СОЗДАНИЯ ФУНКЦИИ) ==========
     public void executeOracleQuery(HttpExchange query, JSONObject result, String datasetName,
                                    String dbName, JSONObject vars, boolean debugMode) {
         System.out.println("=== executeOracleDataset: " + datasetName + " ===");
@@ -88,39 +88,47 @@ public class OracleDatasetHandler {
         }
 
         String sqlContent = (String) param.get("SQL_RAW");
-        String contentHash = (String) param.get("contentHash");
         DatabaseConfig dbConfig = (DatabaseConfig) param.get("dbConfig");
-        String schema = (String) param.get("schema");
 
         if (dbConfig == null) {
             result.put("ERROR", "Database configuration not found");
             return;
         }
 
-        // Генерируем имя функции на основе датасета и хэша
-        String functionName = generateFunctionName(datasetName, contentHash);
-        String fullFunctionName = schema + "." + functionName;
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+        ResultSet rs = null;
 
-        // Проверяем, существует ли функция в БД (с кэшированием)
-        boolean functionExists = checkFunctionExistsInDB(dbConfig, schema, functionName);
-        boolean needsCreation = debugMode || !functionExists || needsRecreationByHash(fullFunctionName, contentHash);
-
-        if (needsCreation) {
-            // Ленивое создание функции при первом вызове
-            System.out.println("Creating Oracle function on first call: " + fullFunctionName);
-
-            if (!createFunction(dbConfig, schema, functionName, sqlContent, contentHash)) {
-                result.put("ERROR", "Failed to create function: " + fullFunctionName);
-                result.put("SQL", sqlContent);
+        try {
+            conn = OracleQuery.getConnect(dbConfig);
+            if (conn == null) {
+                result.put("ERROR", "Oracle connection failed");
                 return;
             }
 
-            // Обновляем кэш хэша
-            updateFunctionHashCache(fullFunctionName, contentHash);
-        }
+            pstmt = conn.prepareStatement(sqlContent);
+            rs = pstmt.executeQuery();
 
-        // Выполняем функцию
-        executeFunction(query, result, fullFunctionName, dbConfig, vars, debugMode);
+            JSONArray dataArray = resultSetToJSONArray(rs);
+            result.put("data", dataArray);
+
+            if (debugMode) {
+                result.put("sql", sqlContent);
+                result.put("db", dbName);
+            }
+
+        } catch (SQLException e) {
+            result.put("ERROR", "Oracle SQL Error: " + e.getMessage());
+            e.printStackTrace();
+            try { if (conn != null) conn.rollback(); } catch (SQLException ignored) {}
+        } catch (Exception e) {
+            result.put("ERROR", "Error: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            try { if (rs != null) rs.close(); } catch (Exception ignore) {}
+            try { if (pstmt != null) pstmt.close(); } catch (Exception ignore) {}
+            OracleQuery.releaseConnection(conn);
+        }
     }
 
     /**

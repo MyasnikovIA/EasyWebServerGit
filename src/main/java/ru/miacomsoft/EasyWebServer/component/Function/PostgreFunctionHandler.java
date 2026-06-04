@@ -507,10 +507,19 @@ public class PostgreFunctionHandler {
             if (i > 0) params.append(",");
             params.append("?");
         }
-        if (returnsSet) {
-            return "SELECT * FROM " + schema + "." + functionName + "(" + params.toString() + ")";
+
+        // Если в имени функции есть точка, значит схема уже включена
+        String fullName;
+        if (functionName.contains(".")) {
+            fullName = functionName;
         } else {
-            return "{? = call " + schema + "." + functionName + "(" + params.toString() + ")}";
+            fullName = schema + "." + functionName;
+        }
+
+        if (returnsSet) {
+            return "SELECT * FROM " + fullName + "(" + params.toString() + ")";
+        } else {
+            return "{? = call " + fullName + "(" + params.toString() + ")}";
         }
     }
 

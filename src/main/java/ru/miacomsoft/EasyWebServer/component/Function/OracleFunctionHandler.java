@@ -93,26 +93,23 @@ public class OracleFunctionHandler {
                 return;
             }
 
-            // Определяем, функция возвращает курсор (SYS_REFCURSOR) или скалярное значение
-            boolean returnsCursor = checkIfReturnsCursor(conn, functionName);
-
+            // Формируем вызов функции - если есть точка, значит имя уже включает схему
             String callSql;
-            if (returnsCursor) {
+            if (functionName.contains(".")) {
+                // Имя уже содержит схему, используем как есть
                 callSql = "{ ? = call " + functionName + "(" + buildPlaceholders(varNames.size()) + ") }";
             } else {
-                callSql = "{ ? = call " + functionName + "(" + buildPlaceholders(varNames.size()) + ") }";
+                // Добавляем схему из конфигурации
+                String schema = (String) param.get("schema");
+                callSql = "{ ? = call " + schema + "." + functionName + "(" + buildPlaceholders(varNames.size()) + ") }";
             }
+
+            System.out.println("Call SQL: " + callSql);
 
             cs = conn.prepareCall(callSql);
+            cs.registerOutParameter(1, OracleTypes.CURSOR);
 
-            // Регистрируем выходной параметр для возвращаемого значения
-            if (returnsCursor) {
-                cs.registerOutParameter(1, OracleTypes.CURSOR);
-            } else {
-                cs.registerOutParameter(1, getOracleSqlType(getReturnType(varNames, varTypes, varDirections)));
-            }
-
-            int idx = 2; // Начинаем с 2, т.к. первый параметр - возвращаемое значение
+            int idx = 2;
             for (String vname : varNames) {
                 String dir = varDirections.getOrDefault(vname, "IN");
                 if ("OUT".equals(dir) || "INOUT".equals(dir)) {
@@ -132,20 +129,9 @@ public class OracleFunctionHandler {
             }
 
             cs.execute();
-
-            JSONArray dataArray = new JSONArray();
-
-            if (returnsCursor) {
-                rs = (ResultSet) cs.getObject(1);
-                dataArray = resultSetToJSONArray(rs);
-            } else {
-                Object returnValue = cs.getObject(1);
-                if (returnValue != null) {
-                    JSONObject row = new JSONObject();
-                    row.put("result", returnValue);
-                    dataArray.put(row);
-                }
-            }
+            rs = (ResultSet) cs.getObject(1);
+            JSONArray dataArray = resultSetToJSONArray(rs);
+            result.put("data", dataArray);
 
             // Получаем OUT параметры
             idx = 2;
@@ -158,7 +144,6 @@ public class OracleFunctionHandler {
                 idx++;
             }
 
-            result.put("data", dataArray);
             if (debugMode) {
                 result.put("function", functionName);
                 result.put("call_sql", callSql);
