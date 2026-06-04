@@ -721,5 +721,6 @@ class SpecialClassLoader extends ClassLoader {
     public void addClass(MemoryByteCode code) {
         byteCode = code;
     }
+
 }
 

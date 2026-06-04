@@ -10,6 +10,7 @@ import ru.miacomsoft.EasyWebServer.DatabaseConfig;
 import ru.miacomsoft.EasyWebServer.HttpExchange;
 import ru.miacomsoft.EasyWebServer.JavaStrExecut;
 import ru.miacomsoft.EasyWebServer.ServerConstant;
+import ru.miacomsoft.EasyWebServer.component.Action.JavaActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Action.OracleActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Action.PostgreActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Function.OracleFunctionHandler;
@@ -279,61 +280,9 @@ public class cmpAction extends Base {
     /**
      * Выполнение Java действия (создание/вызов при первом обращении)
      */
-    private static void executeJavaAction(HttpExchange query, JSONObject result,
-                                          ActionCache cache, JSONObject vars) {
+    private static void executeJavaAction(HttpExchange query, JSONObject result, ActionCache cache, JSONObject vars) {
         System.out.println("=== executeJavaAction: " + cache.name + " ===");
-
-        // Проверяем, скомпилировано ли уже действие
-        String fullFunctionName = ServerConstant.config.APP_NAME + "_" + cache.name;
-
-        if (!JavaStrExecut.InstanceClassName.containsKey(fullFunctionName) &&
-                !JavaStrExecut.InstanceClassName.containsKey(cache.name)) {
-
-            // Первый вызов - компилируем код
-            System.out.println("First call - compiling Java action: " + cache.name);
-
-            JSONObject infoCompile = new JSONObject();
-            JavaStrExecut javaCompiler = new JavaStrExecut();
-
-            // Преобразуем List в ArrayList для совместимости с методом compile
-            ArrayList<String> importPacketsList = new ArrayList<>(cache.importPackets);
-            ArrayList<String> jarResourcesList = new ArrayList<>(cache.jarResources);
-
-            if (!javaCompiler.compile(cache.name, importPacketsList, jarResourcesList,
-                    cache.javaCode, infoCompile)) {
-                result.put("ERROR", "Compilation failed: " + infoCompile.toString());
-                return;
-            }
-        }
-
-        // Выполняем скомпилированное действие
-        JavaStrExecut javaExecutor = new JavaStrExecut();
-
-        // Подготовка входных переменных
-        JSONObject callVars = new JSONObject();
-        for (ActionVar var : cache.variables) {
-            if ("IN".equals(var.direction) || "INOUT".equals(var.direction)) {
-                String value = getValueFromVars(vars, query.session, var.name, var.defaultVal);
-                callVars.put(var.name, value);
-            }
-        }
-
-        JSONArray dataArr = new JSONArray();
-        JSONObject res = javaExecutor.runFunction(cache.name, callVars, query.session, dataArr);
-
-        if (res.has("JAVA_ERROR")) {
-            result.put("ERROR", res.get("JAVA_ERROR"));
-        } else {
-            // Обновляем выходные переменные
-            for (ActionVar var : cache.variables) {
-                if ("OUT".equals(var.direction) || "INOUT".equals(var.direction)) {
-                    if (res.has(var.name)) {
-                        updateVars(vars, query.session, var.name, res.get(var.name).toString(), var.srctype);
-                    }
-                }
-            }
-            result.put("vars", vars);
-        }
+        JavaActionHandler.INSTANCE.executeJavaAction(query, result, cache, vars, query.session);
     }
 
     /**
@@ -519,11 +468,12 @@ public class cmpAction extends Base {
         public List<ActionVar> variables;
     }
 
-    private static class ActionVar {
+    // Измените с private static class на public static class
+    public static class ActionVar {
         public String name, src, srctype, len, defaultVal, type, direction;
     }
 
-    private static class ActionCache {
+    public static class ActionCache {
         public String name, dbName, queryType, schema, dbType, docPath, rootPath;
         public boolean isOracle;
         public DatabaseConfig dbConfig;
