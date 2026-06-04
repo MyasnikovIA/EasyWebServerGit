@@ -184,7 +184,6 @@ public class cmpDataset_js {
                     var pg_schema = ctrlObj.getAttribute('pg_schema') || 'public';
                     var database_name = ctrlObj.getAttribute('db') || '';
                     var db_type = ctrlObj.getAttribute('db_type') || '';
-            
                     // Формируем данные для отправки
                     var requestData = {};
             

@@ -11,16 +11,12 @@ import ru.miacomsoft.EasyWebServer.ServerConstant;
 import ru.miacomsoft.EasyWebServer.component.Action.JavaActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Action.OracleActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Action.PostgreActionHandler;
+import ru.miacomsoft.EasyWebServer.component.Function.OracleFunctionHandler;
+import ru.miacomsoft.EasyWebServer.component.Function.PostgreFunctionHandler;
 
 import java.util.HashMap;
 import java.util.Iterator;
 
-/**
- * Центральный класс cmpAction – точка входа.
- * Отвечает за:
- * - инициализацию компонента (парсинг атрибутов, вызов соответствующих обработчиков)
- * - обработку HTTP-запроса onPage (парсинг параметров, делегирование выполнения)
- */
 @SuppressWarnings("unchecked")
 public class cmpAction extends Base {
 
@@ -35,10 +31,28 @@ public class cmpAction extends Base {
         initialize(doc, element);
     }
 
-    // ======================== ИНИЦИАЛИЗАЦИЯ КОМПОНЕНТА НА СТРАНИЦЕ ========================
+    // ======================== ИНИЦИАЛИЗАЦИЯ ========================
     private void initialize(Document doc, Element element) {
         ActionConfig config = parseActionConfig(doc, element);
+        Attributes attrs = element.attributes();
 
+        // Проверяем, нужно ли вызывать существующую функцию БД
+        // Условие: есть атрибут action И нет содержимого внутри тега
+        boolean hasAction = attrs.hasKey("action") && !attrs.get("action").trim().isEmpty();
+        boolean hasNoContent = element.text().trim().isEmpty();
+
+        if (hasAction && hasNoContent) {
+            // Вызов существующей функции/процедуры БД
+            if (config.isOracle) {
+                OracleFunctionHandler.INSTANCE.handleActionFunction(doc, element, config, this);
+            } else {
+                PostgreFunctionHandler.INSTANCE.handleActionFunction(doc, element, config, this);
+            }
+            attachJavaScriptLibrary(doc, config.name);
+            return;
+        }
+
+        // Существующая логика для SQL/Java
         if (config.isOracle) {
             OracleActionHandler.INSTANCE.handleOracleAction(doc, element, config, this);
         } else if ("java".equals(config.queryType)) {
@@ -61,39 +75,38 @@ public class cmpAction extends Base {
         JSONObject result = new JSONObject();
         result.put("vars", vars);
 
-        // Делегирование в зависимости от типа запроса
+        // Обработка Java действия
         if ("java".equals(params.queryType)) {
             JavaActionHandler.INSTANCE.executeJavaAction(query, result, params.actionName, vars, query.session);
             return result.toString().getBytes();
         }
 
-        if (!"sql".equals(params.queryType)) {
-            result.put("ERROR", "Unsupported query type: " + params.queryType);
+        // Обработка обычного SQL запроса
+        if ("sql".equals(params.queryType)) {
+            Object actionParams = findActionInCache(params.actionName);
+            if (actionParams == null) {
+                result.put("ERROR", "Action not found: " + params.actionName);
+                return result.toString().getBytes();
+            }
+
+            HashMap<String, Object> param = (HashMap<String, Object>) actionParams;
+            String savedDbType = (String) param.get("dbType");
+            boolean isOracle = "oci8".equals(savedDbType);
+            String connectionDbName = resolveDbName(params.dbName, (String) param.get("dbName"));
+
+            if (isOracle) {
+                OracleActionHandler.INSTANCE.executeOracleAction(query, result, params.actionName, connectionDbName, vars, params.debugMode);
+            } else {
+                PostgreActionHandler.INSTANCE.executePostgresAction(query, result, params.actionName, vars, query.session, params.debugMode);
+            }
             return result.toString().getBytes();
         }
 
-        // Определяем, какой обработчик SQL вызвать (по наличию в кэше)
-        Object actionParams = findActionInCache(params.actionName);
-        if (actionParams == null) {
-            result.put("ERROR", "Action not found: " + params.actionName);
-            return result.toString().getBytes();
-        }
-
-        HashMap<String, Object> param = (HashMap<String, Object>) actionParams;
-        String savedDbType = (String) param.get("dbType");
-        boolean isOracle = "oci8".equals(savedDbType);
-        String connectionDbName = resolveDbName(params.dbName, (String) param.get("dbName"));
-
-        if (isOracle) {
-            OracleActionHandler.INSTANCE.executeOracleAction(query, result, params.actionName, connectionDbName, vars, params.debugMode);
-        } else {
-            PostgreActionHandler.INSTANCE.executePostgresAction(query, result, params.actionName, vars, query.session, params.debugMode);
-        }
-
+        result.put("ERROR", "Unsupported query type: " + params.queryType);
         return result.toString().getBytes();
     }
 
-    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (общие для всех) ========================
+    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
     private void attachJavaScriptLibrary(Document doc, String name) {
         if (doc == null) return;
         Elements head = doc.getElementsByTag("head");
@@ -128,28 +141,20 @@ public class cmpAction extends Base {
     }
 
     private DatabaseConfig getDatabaseConfiguration(ActionConfig config) {
-        System.out.println("getDatabaseConfiguration for dbName: " + config.dbName);
         if (config.dbName.equals("default") || config.dbName.equals("db")) {
             DatabaseConfig dbConfig = ServerConstant.config.DATABASES.get("default");
             if (dbConfig == null) {
-                System.out.println("No default DB config, creating via PostgreActionHandler");
                 dbConfig = PostgreActionHandler.INSTANCE.createDefaultPostgresConfig();
-                if (dbConfig == null) {
-                    System.err.println("ERROR: Failed to create default PostgreSQL config");
-                } else {
-                    System.out.println("Default config created: " + dbConfig.getHost() + ":" + dbConfig.getPort() + "/" + dbConfig.getDatabase());
-                }
             }
             return dbConfig;
         }
         return ServerConstant.config.getDatabaseConfig(config.dbName.toLowerCase());
     }
 
-
     private static RequestParams parseRequestParams(HttpExchange query) {
         RequestParams params = new RequestParams();
         JSONObject qp = query.requestParam;
-        params.queryType = qp.optString("query_type", "java");
+        params.queryType = qp.optString("query_type", "sql");
         String actionName = qp.optString("action_name", "");
         if ("null".equals(actionName)) actionName = "";
         params.actionName = actionName;
@@ -185,12 +190,21 @@ public class cmpAction extends Base {
 
     private static Object findActionInCache(String actionName) {
         if (actionName == null || actionName.isEmpty()) return null;
+
+        // Поиск в кэшах действий
         Object action = JavaActionHandler.INSTANCE.procedureList.get(actionName);
         if (action != null) return action;
         action = OracleActionHandler.INSTANCE.procedureList.get(actionName);
         if (action != null) return action;
         action = PostgreActionHandler.INSTANCE.procedureList.get(actionName);
         if (action != null) return action;
+
+        // Поиск в кэшах функций (для вызова через action)
+        action = OracleFunctionHandler.INSTANCE.functionCache.get(actionName);
+        if (action != null) return action;
+        action = PostgreFunctionHandler.INSTANCE.functionCache.get(actionName);
+        if (action != null) return action;
+
         // поиск по суффиксу
         for (String key : JavaActionHandler.INSTANCE.procedureList.keySet())
             if (key.endsWith("." + actionName)) return JavaActionHandler.INSTANCE.procedureList.get(key);
@@ -198,6 +212,11 @@ public class cmpAction extends Base {
             if (key.endsWith("." + actionName)) return OracleActionHandler.INSTANCE.procedureList.get(key);
         for (String key : PostgreActionHandler.INSTANCE.procedureList.keySet())
             if (key.endsWith("." + actionName)) return PostgreActionHandler.INSTANCE.procedureList.get(key);
+        for (String key : OracleFunctionHandler.INSTANCE.functionCache.keySet())
+            if (key.endsWith("." + actionName)) return OracleFunctionHandler.INSTANCE.functionCache.get(key);
+        for (String key : PostgreFunctionHandler.INSTANCE.functionCache.keySet())
+            if (key.endsWith("." + actionName)) return PostgreFunctionHandler.INSTANCE.functionCache.get(key);
+
         return null;
     }
 
@@ -207,7 +226,7 @@ public class cmpAction extends Base {
         return requestDbName;
     }
 
-    // ======================== ВНУТРЕННИЕ КЛАССЫ (DTO) ========================
+    // ======================== ВНУТРЕННИЕ КЛАССЫ ========================
     public static class ActionConfig {
         public String name, dbName, queryType, schema, dbType, docPath, rootPath;
         public boolean isOracle;

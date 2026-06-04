@@ -149,6 +149,7 @@ public class cmpAction_js {
                     }
             
                     var query_type = ctrlObj.getAttribute('query_type') || 'java';
+                    var action = ctrlObj.getAttribute('action') || '';
                     var action_name = ctrlObj.getAttribute('action_name');
                     if (!action_name) { 
                         action_name = ctrlObj.getAttribute('name')
@@ -199,7 +200,7 @@ public class cmpAction_js {
                             requestData[key].len = len;
                         }
                     }
-                    fetch('/{component}/cmpAction?query_type=' + query_type + '&action_name=' + action_name + '&pg_schema=' + pg_schema, {
+                    fetch('/{component}/cmpAction?query_type=' + query_type + '&action_name=' + action_name + '&pg_schema=' + pg_schema+'&action='+action, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'

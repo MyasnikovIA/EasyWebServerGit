@@ -12,6 +12,8 @@ import ru.miacomsoft.EasyWebServer.ServerConstant;
 import ru.miacomsoft.EasyWebServer.component.Dataset.JavaDatasetHandler;
 import ru.miacomsoft.EasyWebServer.component.Dataset.OracleDatasetHandler;
 import ru.miacomsoft.EasyWebServer.component.Dataset.PostgreDatasetHandler;
+import ru.miacomsoft.EasyWebServer.component.Function.OracleFunctionHandler;
+import ru.miacomsoft.EasyWebServer.component.Function.PostgreFunctionHandler;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -34,7 +36,25 @@ public class cmpDataset extends Base {
     // ======================== ИНИЦИАЛИЗАЦИЯ ========================
     private void initialize(Document doc, Element element) {
         DatasetConfig config = parseDatasetConfig(doc, element);
+        Attributes attrs = element.attributes();
 
+        // Проверяем, нужно ли вызывать существующую функцию БД
+        // Условие: есть атрибут action И нет содержимого внутри тега
+        boolean hasAction = attrs.hasKey("action") && !attrs.get("action").trim().isEmpty();
+        boolean hasNoContent = element.text().trim().isEmpty();
+
+        if (hasAction && hasNoContent) {
+            // Вызов существующей функции БД
+            if (config.isOracle) {
+                OracleFunctionHandler.INSTANCE.handleDatasetFunction(doc, element, config, this);
+            } else {
+                PostgreFunctionHandler.INSTANCE.handleDatasetFunction(doc, element, config, this);
+            }
+            attachJavaScriptLibrary(doc, config.name);
+            return;
+        }
+
+        // Существующая логика для SQL/Java (есть SQL запрос или Java код внутри тега)
         if (config.isOracle) {
             OracleDatasetHandler.INSTANCE.handleOracleDataset(doc, element, config, this);
         } else if ("java".equals(config.queryType)) {
@@ -57,36 +77,42 @@ public class cmpDataset extends Base {
         JSONObject result = new JSONObject();
         result.put("data", new JSONArray());
         result.put("vars", vars);
-
+        
+        // Обработка Java датасета
         if ("java".equals(params.queryType)) {
             JavaDatasetHandler.INSTANCE.executeJavaDataset(query, result, params.datasetName, vars, query.session, params.debugMode);
             return result.toString().getBytes();
         }
 
-        if (!"sql".equals(params.queryType)) {
-            result.put("ERROR", "Unsupported query type: " + params.queryType);
+        // Обработка обычного SQL запроса
+        if ("sql".equals(params.queryType)) {
+            // Поиск датасета в кэшах обработчиков
+            Object datasetParams = findDatasetInCache(params.datasetName, params.pgSchema);
+            if (datasetParams == null) {
+                result.put("ERROR", "Dataset not found: " + params.datasetName);
+                return result.toString().getBytes();
+            }
+
+            HashMap<String, Object> param = (HashMap<String, Object>) datasetParams;
+            String savedDbType = (String) param.get("dbType");
+            String action = (String) param.get("action");
+            boolean isOracle = "oci8".equals(savedDbType);
+            String connectionDbName = resolveDbName(params.dbName, (String) param.get("dbName"));
+
+            if (isOracle) {
+                OracleDatasetHandler.INSTANCE.executeOracleQuery(query, result, params.datasetName, connectionDbName, vars, params.debugMode);
+            } else {
+                String fullName = params.datasetName;
+                if (params.pgSchema!=null && params.pgSchema.length()>0) {
+                    fullName = params.pgSchema + "." + params.datasetName;
+                }
+                PostgreDatasetHandler.INSTANCE.executePostgresQuery(query, result, fullName, vars, params.debugMode);
+            }
             return result.toString().getBytes();
         }
 
-        // Поиск датасета в кэшах обработчиков
-        Object datasetParams = findDatasetInCache(params.datasetName, params.pgSchema);
-        if (datasetParams == null) {
-            result.put("ERROR", "Dataset not found: " + params.datasetName);
-            return result.toString().getBytes();
-        }
-
-        HashMap<String, Object> param = (HashMap<String, Object>) datasetParams;
-        String savedDbType = (String) param.get("dbType");
-        boolean isOracle = "oci8".equals(savedDbType);
-        String connectionDbName = resolveDbName(params.dbName, (String) param.get("dbName"));
-
-        if (isOracle) {
-            OracleDatasetHandler.INSTANCE.executeOracleQuery(query, result, params.datasetName, connectionDbName, vars, params.debugMode);
-        } else {
-            String fullName = params.pgSchema + "." + params.datasetName;
-            PostgreDatasetHandler.INSTANCE.executePostgresQuery(query, result, fullName, vars, params.debugMode);
-        }
-
+        // Если тип запроса не распознан
+        result.put("ERROR", "Unsupported query type: " + params.queryType);
         return result.toString().getBytes();
     }
 
@@ -199,18 +225,32 @@ public class cmpDataset extends Base {
 
     private static Object findDatasetInCache(String datasetName, String pgSchema) {
         if (datasetName == null || datasetName.isEmpty()) return null;
+
+        // Поиск в кэшах датасетов
         Object obj = JavaDatasetHandler.INSTANCE.procedureList.get(datasetName);
         if (obj != null) return obj;
         obj = OracleDatasetHandler.INSTANCE.procedureList.get(datasetName);
         if (obj != null) return obj;
         obj = PostgreDatasetHandler.INSTANCE.procedureList.get(datasetName);
         if (obj != null) return obj;
+
+        // Поиск в кэшах функций (для случая, когда вызывается функция через action)
+        obj = OracleFunctionHandler.INSTANCE.functionCache.get(datasetName);
+        if (obj != null) return obj;
+        obj = PostgreFunctionHandler.INSTANCE.functionCache.get(datasetName);
+        if (obj != null) return obj;
+
         // поиск по полному имени со схемой
         String fullName = pgSchema + "." + datasetName;
         obj = OracleDatasetHandler.INSTANCE.procedureList.get(fullName);
         if (obj != null) return obj;
         obj = PostgreDatasetHandler.INSTANCE.procedureList.get(fullName);
         if (obj != null) return obj;
+        obj = OracleFunctionHandler.INSTANCE.functionCache.get(fullName);
+        if (obj != null) return obj;
+        obj = PostgreFunctionHandler.INSTANCE.functionCache.get(fullName);
+        if (obj != null) return obj;
+
         // поиск по суффиксу
         for (String key : JavaDatasetHandler.INSTANCE.procedureList.keySet())
             if (key.endsWith("." + datasetName)) return JavaDatasetHandler.INSTANCE.procedureList.get(key);
@@ -218,6 +258,11 @@ public class cmpDataset extends Base {
             if (key.endsWith("." + datasetName)) return OracleDatasetHandler.INSTANCE.procedureList.get(key);
         for (String key : PostgreDatasetHandler.INSTANCE.procedureList.keySet())
             if (key.endsWith("." + datasetName)) return PostgreDatasetHandler.INSTANCE.procedureList.get(key);
+        for (String key : OracleFunctionHandler.INSTANCE.functionCache.keySet())
+            if (key.endsWith("." + datasetName)) return OracleFunctionHandler.INSTANCE.functionCache.get(key);
+        for (String key : PostgreFunctionHandler.INSTANCE.functionCache.keySet())
+            if (key.endsWith("." + datasetName)) return PostgreFunctionHandler.INSTANCE.functionCache.get(key);
+
         return null;
     }
 

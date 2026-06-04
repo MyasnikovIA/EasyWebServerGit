@@ -486,7 +486,7 @@ public class OracleQuery {
     /**
      * Возвращает соединение в пул
      */
-    private static void releaseConnection(Connection conn) {
+    public static void releaseConnection(Connection conn) {
         if (conn == null) return;
 
         // Ищем пул, которому принадлежит это соединение
