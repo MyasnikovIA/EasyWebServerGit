@@ -1,5 +1,6 @@
 package ru.miacomsoft.EasyWebServer.component;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.Document;
@@ -7,18 +8,22 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import ru.miacomsoft.EasyWebServer.DatabaseConfig;
 import ru.miacomsoft.EasyWebServer.HttpExchange;
+import ru.miacomsoft.EasyWebServer.JavaStrExecut;
 import ru.miacomsoft.EasyWebServer.ServerConstant;
-import ru.miacomsoft.EasyWebServer.component.Action.JavaActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Action.OracleActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Action.PostgreActionHandler;
 import ru.miacomsoft.EasyWebServer.component.Function.OracleFunctionHandler;
 import ru.miacomsoft.EasyWebServer.component.Function.PostgreFunctionHandler;
 
-import java.util.HashMap;
-import java.util.Iterator;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @SuppressWarnings("unchecked")
 public class cmpAction extends Base {
+
+    // ======================== КЭШИ НА СЕРВЕРЕ ========================
+    // Кэш конфигураций действий (имя -> ActionCache)
+    private static final Map<String, ActionCache> actionCache = new ConcurrentHashMap<>();
 
     // ======================== КОНСТРУКТОРЫ ========================
     public cmpAction(Document doc, Element element, String tag) {
@@ -37,76 +42,91 @@ public class cmpAction extends Base {
         Attributes attrs = element.attributes();
 
         // Проверяем, нужно ли вызывать существующую функцию БД
-        // Условие: есть атрибут action И нет содержимого внутри тега
         boolean hasAction = attrs.hasKey("action") && !attrs.get("action").trim().isEmpty();
         boolean hasNoContent = element.text().trim().isEmpty();
 
         if (hasAction && hasNoContent) {
-            // Вызов существующей функции/процедуры БД
-            if (config.isOracle) {
-                OracleFunctionHandler.INSTANCE.handleActionFunction(doc, element, config, this);
-            } else {
-                PostgreFunctionHandler.INSTANCE.handleActionFunction(doc, element, config, this);
-            }
+            // Вызов существующей функции/процедуры БД - только сохраняем конфигурацию
+            saveActionToCache(config.name, config);
+            setMinimalAttributes(element, config);
+            finalizeElement(element, config, this);
             attachJavaScriptLibrary(doc, config.name);
             return;
         }
 
-        // Существующая логика для SQL/Java
-        if (config.isOracle) {
-            OracleActionHandler.INSTANCE.handleOracleAction(doc, element, config, this);
-        } else if ("java".equals(config.queryType)) {
-            JavaActionHandler.INSTANCE.handleJavaAction(doc, element, config, this);
-        } else {
-            PostgreActionHandler.INSTANCE.handlePostgreAction(doc, element, config, this);
-        }
+        // Для SQL/Java режимов: сохраняем конфигурацию, НО НЕ СОЗДАЁМ ПРОЦЕДУРЫ СРАЗУ
+        // Процедуры будут созданы при первом вызове executeAction
+        saveActionToCache(config.name, config);
 
+        setMinimalAttributes(element, config);
+        finalizeElement(element, config, this);
         attachJavaScriptLibrary(doc, config.name);
     }
 
-    // ======================== HTTP ЗАПРОСЫ (onPage) ========================
-    public static byte[] onPage(HttpExchange query) {
-        query.mimeType = "application/json";
+    /**
+     * Сохранение конфигурации действия в кэш
+     */
+    private void saveActionToCache(String name, ActionConfig config) {
+        ActionCache cache = new ActionCache();
+        cache.name = config.name;
+        cache.dbName = config.dbName;
+        cache.queryType = config.queryType;
+        cache.schema = config.schema;
+        cache.dbType = config.dbType;
+        cache.isOracle = config.isOracle;
+        cache.dbConfig = config.dbConfig;
+        cache.sqlContent = config.sqlContent;
+        cache.javaCode = config.javaCode;
+        cache.docPath = config.docPath;
+        cache.rootPath = config.rootPath;
+        cache.variables = config.variables;
 
-        RequestParams params = parseRequestParams(query);
-        System.out.println("=== cmpAction onPage: " + params.actionName + " ===");
+        // Создаём новые ArrayList из List
+        cache.importPackets = new ArrayList<>(config.importPackets);
+        cache.jarResources = new ArrayList<>(config.jarResources);
 
-        JSONObject vars = parseVarsFromBody(query);
-        JSONObject result = new JSONObject();
-        result.put("vars", vars);
-
-        // Обработка Java действия
-        if ("java".equals(params.queryType)) {
-            JavaActionHandler.INSTANCE.executeJavaAction(query, result, params.actionName, vars, query.session);
-            return result.toString().getBytes();
-        }
-
-        // Обработка обычного SQL запроса
-        if ("sql".equals(params.queryType)) {
-            Object actionParams = findActionInCache(params.actionName);
-            if (actionParams == null) {
-                result.put("ERROR", "Action not found: " + params.actionName);
-                return result.toString().getBytes();
-            }
-
-            HashMap<String, Object> param = (HashMap<String, Object>) actionParams;
-            String savedDbType = (String) param.get("dbType");
-            boolean isOracle = "oci8".equals(savedDbType);
-            String connectionDbName = resolveDbName(params.dbName, (String) param.get("dbName"));
-
-            if (isOracle) {
-                OracleActionHandler.INSTANCE.executeOracleAction(query, result, params.actionName, connectionDbName, vars, params.debugMode);
-            } else {
-                PostgreActionHandler.INSTANCE.executePostgresAction(query, result, params.actionName, vars, query.session, params.debugMode);
-            }
-            return result.toString().getBytes();
-        }
-
-        result.put("ERROR", "Unsupported query type: " + params.queryType);
-        return result.toString().getBytes();
+        actionCache.put(name, cache);
+        System.out.println("Action cached: " + name);
     }
 
-    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
+    /**
+     * Установка минимальных атрибутов на клиенте
+     */
+    private void setMinimalAttributes(Element element, ActionConfig config) {
+        element.attr("style", "display:none");
+        element.attr("action_name", config.name);
+        element.attr("name", config.name);
+        element.attr("vars", buildVarsJson(config.variables));
+        // Только минимально необходимые атрибуты
+        if (config.queryType != null && !config.queryType.equals("sql")) {
+            element.attr("query_type", config.queryType);
+        }
+    }
+
+    private void finalizeElement(Element element, ActionConfig config, Base base) {
+        element.empty();
+        base.attr("name", config.name);
+    }
+
+    private String buildVarsJson(java.util.List<ActionVar> variables) {
+        StringBuilder json = new StringBuilder("{");
+        for (int i = 0; i < variables.size(); i++) {
+            ActionVar v = variables.get(i);
+            if (i > 0) json.append(",");
+            json.append("'").append(v.name).append("':{");
+            json.append("'src':'").append(v.src).append("',");
+            json.append("'srctype':'").append(v.srctype).append("',");
+            json.append("'direction':'").append(v.direction).append("'");
+            if (v.defaultVal != null && !v.defaultVal.isEmpty())
+                json.append(",'defaultVal':'").append(escapeJson(v.defaultVal)).append("'");
+            if (v.len != null && !v.len.isEmpty())
+                json.append(",'len':'").append(v.len).append("'");
+            json.append("}");
+        }
+        json.append("}");
+        return json.toString();
+    }
+
     private void attachJavaScriptLibrary(Document doc, String name) {
         if (doc == null) return;
         Elements head = doc.getElementsByTag("head");
@@ -118,9 +138,11 @@ public class cmpAction extends Base {
         }
     }
 
+    // ======================== ПАРСИНГ КОНФИГУРАЦИИ ========================
     private ActionConfig parseActionConfig(Document doc, Element element) {
         ActionConfig config = new ActionConfig();
         Attributes attrs = element.attributes();
+
         config.name = attrs.get("name");
         config.dbName = RemoveArrKeyRtrn(attrs, "db", "default");
         config.queryType = attrs.hasKey("query_type") ? attrs.get("query_type") : "sql";
@@ -128,6 +150,26 @@ public class cmpAction extends Base {
         config.dbType = attrs.hasKey("db_type") ? attrs.get("db_type") : "jdbc";
         config.docPath = doc != null ? doc.attr("doc_path") : "";
         config.rootPath = doc != null ? doc.attr("rootPath") : "";
+
+        // Парсим содержимое (SQL или Java код)
+        config.sqlContent = element.hasText() ? element.text().trim() : "";
+        config.javaCode = config.sqlContent; // для Java режима
+
+        // Парсим импорты для Java
+        config.importPackets = new ArrayList<>();  // ArrayList
+        config.jarResources = new ArrayList<>();   // ArrayList
+
+        for (Element child : element.children()) {
+            String tagName = child.tag().toString().toLowerCase();
+            if (tagName.contains("import")) {
+                Attributes childAttrs = child.attributes();
+                if (childAttrs.hasKey("path")) config.jarResources.add(childAttrs.get("path"));
+                if (childAttrs.hasKey("packet")) config.importPackets.add(childAttrs.get("packet"));
+            }
+        }
+
+        // Парсим переменные
+        config.variables = parseVariables(element);
 
         config.dbConfig = getDatabaseConfiguration(config);
         if (config.dbConfig != null) {
@@ -137,7 +179,34 @@ public class cmpAction extends Base {
                 config.schema = config.dbConfig.getSchema() != null ? config.dbConfig.getSchema() : "public";
             }
         }
+
         return config;
+    }
+
+    private java.util.List<ActionVar> parseVariables(Element element) {
+        java.util.List<ActionVar> vars = new java.util.ArrayList<>();
+        for (Element child : element.children()) {
+            String tag = child.tag().toString().toLowerCase();
+            if (tag.contains("var") || tag.contains("cmpactionvar")) {
+                vars.add(parseActionVar(child));
+            }
+        }
+        return vars;
+    }
+
+    private ActionVar parseActionVar(Element element) {
+        Attributes attrs = element.attributes();
+        ActionVar var = new ActionVar();
+        var.name = attrs.get("name");
+        var.src = removeAttr(attrs, "src", var.name);
+        var.srctype = removeAttr(attrs, "srctype", "var");
+        var.len = removeAttr(attrs, "len", "");
+        var.defaultVal = removeAttr(attrs, "default", "");
+        var.type = removeAttr(attrs, "type", "string");
+        String put = attrs.hasKey("put") ? attrs.get("put") : null;
+        String get = attrs.hasKey("get") ? attrs.get("get") : null;
+        var.direction = (put != null && get != null) ? "INOUT" : (put != null ? "OUT" : "IN");
+        return var;
     }
 
     private DatabaseConfig getDatabaseConfiguration(ActionConfig config) {
@@ -151,19 +220,233 @@ public class cmpAction extends Base {
         return ServerConstant.config.getDatabaseConfig(config.dbName.toLowerCase());
     }
 
-    private static RequestParams parseRequestParams(HttpExchange query) {
-        RequestParams params = new RequestParams();
-        JSONObject qp = query.requestParam;
-        params.queryType = qp.optString("query_type", "sql");
-        String actionName = qp.optString("action_name", "");
-        if ("null".equals(actionName)) actionName = "";
-        params.actionName = actionName;
-        params.pgSchema = qp.optString("pg_schema", "public");
-        params.dbName = qp.optString("db", "DB");
-        params.dbType = qp.optString("db_type", "jdbc");
-        params.debugMode = query.session != null && query.session.containsKey("debug_mode") && (boolean) query.session.get("debug_mode");
-        return params;
+    private String removeAttr(Attributes attrs, String key, String defaultValue) {
+        if (attrs.hasKey(key)) {
+            String val = attrs.get(key);
+            attrs.remove(key);
+            return val;
+        }
+        return defaultValue;
     }
+
+    private String escapeJson(String s) {
+        return s.replace("'", "\\\\'");
+    }
+
+    // ======================== HTTP ЗАПРОСЫ (onPage) ========================
+    public static byte[] onPage(HttpExchange query) {
+        query.mimeType = "application/json";
+
+        String actionName = query.requestParam.optString("action_name", "");
+        if (actionName.isEmpty()) {
+            actionName = query.requestParam.optString("name", "");
+        }
+
+        System.out.println("=== cmpAction onPage: " + actionName + " ===");
+
+        // Получаем конфигурацию из кэша на сервере
+        ActionCache cache = actionCache.get(actionName);
+        if (cache == null) {
+            JSONObject error = new JSONObject();
+            error.put("ERROR", "Action not found: " + actionName);
+            return error.toString().getBytes();
+        }
+
+        JSONObject vars = parseVarsFromBody(query);
+        JSONObject result = new JSONObject();
+        result.put("vars", vars);
+
+        // Обработка Java действия
+        if ("java".equals(cache.queryType)) {
+            executeJavaAction(query, result, cache, vars);
+            return result.toString().getBytes();
+        }
+
+        // Обработка SQL действия
+        boolean debugMode = query.session != null &&
+                query.session.containsKey("debug_mode") &&
+                (boolean) query.session.get("debug_mode");
+
+        if (cache.isOracle) {
+            executeOracleAction(query, result, cache, vars, debugMode);
+        } else {
+            executePostgresAction(query, result, cache, vars, debugMode);
+        }
+
+        return result.toString().getBytes();
+    }
+
+    /**
+     * Выполнение Java действия (создание/вызов при первом обращении)
+     */
+    private static void executeJavaAction(HttpExchange query, JSONObject result,
+                                          ActionCache cache, JSONObject vars) {
+        System.out.println("=== executeJavaAction: " + cache.name + " ===");
+
+        // Проверяем, скомпилировано ли уже действие
+        String fullFunctionName = ServerConstant.config.APP_NAME + "_" + cache.name;
+
+        if (!JavaStrExecut.InstanceClassName.containsKey(fullFunctionName) &&
+                !JavaStrExecut.InstanceClassName.containsKey(cache.name)) {
+
+            // Первый вызов - компилируем код
+            System.out.println("First call - compiling Java action: " + cache.name);
+
+            JSONObject infoCompile = new JSONObject();
+            JavaStrExecut javaCompiler = new JavaStrExecut();
+
+            // Преобразуем List в ArrayList для совместимости с методом compile
+            ArrayList<String> importPacketsList = new ArrayList<>(cache.importPackets);
+            ArrayList<String> jarResourcesList = new ArrayList<>(cache.jarResources);
+
+            if (!javaCompiler.compile(cache.name, importPacketsList, jarResourcesList,
+                    cache.javaCode, infoCompile)) {
+                result.put("ERROR", "Compilation failed: " + infoCompile.toString());
+                return;
+            }
+        }
+
+        // Выполняем скомпилированное действие
+        JavaStrExecut javaExecutor = new JavaStrExecut();
+
+        // Подготовка входных переменных
+        JSONObject callVars = new JSONObject();
+        for (ActionVar var : cache.variables) {
+            if ("IN".equals(var.direction) || "INOUT".equals(var.direction)) {
+                String value = getValueFromVars(vars, query.session, var.name, var.defaultVal);
+                callVars.put(var.name, value);
+            }
+        }
+
+        JSONArray dataArr = new JSONArray();
+        JSONObject res = javaExecutor.runFunction(cache.name, callVars, query.session, dataArr);
+
+        if (res.has("JAVA_ERROR")) {
+            result.put("ERROR", res.get("JAVA_ERROR"));
+        } else {
+            // Обновляем выходные переменные
+            for (ActionVar var : cache.variables) {
+                if ("OUT".equals(var.direction) || "INOUT".equals(var.direction)) {
+                    if (res.has(var.name)) {
+                        updateVars(vars, query.session, var.name, res.get(var.name).toString(), var.srctype);
+                    }
+                }
+            }
+            result.put("vars", vars);
+        }
+    }
+
+    /**
+     * Выполнение Oracle действия (создание процедуры при первом вызове)
+     */
+    private static void executeOracleAction(HttpExchange query, JSONObject result,
+                                            ActionCache cache, JSONObject vars, boolean debugMode) {
+        System.out.println("=== executeOracleAction: " + cache.name + " ===");
+
+        // Проверяем, создана ли уже процедура в кэше OracleActionHandler
+        if (!OracleActionHandler.INSTANCE.procedureList.containsKey(cache.name)) {
+            // Первый вызов - создаём процедуру в БД и кэшируем
+            System.out.println("First call - creating Oracle procedure: " + cache.name);
+
+            // Создаём временный элемент для передачи в OracleActionHandler
+            Element tempElement = new Element("textarea");
+            tempElement.text(cache.sqlContent);
+            for (ActionVar var : cache.variables) {
+                Element varElement = new Element("var");
+                varElement.attr("name", var.name);
+                varElement.attr("src", var.src);
+                varElement.attr("srctype", var.srctype);
+                varElement.attr("type", var.type);
+                if ("IN".equals(var.direction)) {
+                    varElement.attr("get", "true");
+                } else if ("OUT".equals(var.direction)) {
+                    varElement.attr("put", "true");
+                } else {
+                    varElement.attr("get", "true");
+                    varElement.attr("put", "true");
+                }
+                if (var.defaultVal != null && !var.defaultVal.isEmpty()) {
+                    varElement.attr("default", var.defaultVal);
+                }
+                if (var.len != null && !var.len.isEmpty()) {
+                    varElement.attr("len", var.len);
+                }
+                tempElement.appendChild(varElement);
+            }
+
+            cmpAction.ActionConfig actionConfig = new cmpAction.ActionConfig();
+            actionConfig.name = cache.name;
+            actionConfig.dbName = cache.dbName;
+            actionConfig.queryType = cache.queryType;
+            actionConfig.schema = cache.schema;
+            actionConfig.dbType = cache.dbType;
+            actionConfig.isOracle = cache.isOracle;
+            actionConfig.dbConfig = cache.dbConfig;
+
+            OracleActionHandler.INSTANCE.handleOracleAction(null, tempElement, actionConfig, null);
+        }
+
+        // Выполняем действие
+        OracleActionHandler.INSTANCE.executeOracleAction(query, result, cache.name,
+                cache.dbName, vars, debugMode);
+    }
+
+    /**
+     * Выполнение PostgreSQL действия (создание процедуры при первом вызове)
+     */
+    private static void executePostgresAction(HttpExchange query, JSONObject result,
+                                              ActionCache cache, JSONObject vars, boolean debugMode) {
+        System.out.println("=== executePostgresAction: " + cache.name + " ===");
+
+        // Проверяем, создана ли уже процедура в кэше PostgreActionHandler
+        if (!PostgreActionHandler.INSTANCE.procedureList.containsKey(cache.name)) {
+            // Первый вызов - создаём процедуру в БД и кэшируем
+            System.out.println("First call - creating PostgreSQL procedure: " + cache.name);
+
+            // Создаём временный элемент для передачи в PostgreActionHandler
+            Element tempElement = new Element("textarea");
+            tempElement.text(cache.sqlContent);
+            for (ActionVar var : cache.variables) {
+                Element varElement = new Element("var");
+                varElement.attr("name", var.name);
+                varElement.attr("src", var.src);
+                varElement.attr("srctype", var.srctype);
+                varElement.attr("type", var.type);
+                if ("IN".equals(var.direction)) {
+                    varElement.attr("get", "true");
+                } else if ("OUT".equals(var.direction)) {
+                    varElement.attr("put", "true");
+                } else {
+                    varElement.attr("get", "true");
+                    varElement.attr("put", "true");
+                }
+                if (var.defaultVal != null && !var.defaultVal.isEmpty()) {
+                    varElement.attr("default", var.defaultVal);
+                }
+                if (var.len != null && !var.len.isEmpty()) {
+                    varElement.attr("len", var.len);
+                }
+                tempElement.appendChild(varElement);
+            }
+
+            cmpAction.ActionConfig actionConfig = new cmpAction.ActionConfig();
+            actionConfig.name = cache.name;
+            actionConfig.dbName = cache.dbName;
+            actionConfig.queryType = cache.queryType;
+            actionConfig.schema = cache.schema;
+            actionConfig.dbType = cache.dbType;
+            actionConfig.isOracle = cache.isOracle;
+            actionConfig.dbConfig = cache.dbConfig;
+
+            PostgreActionHandler.INSTANCE.handlePostgreAction(null, tempElement, actionConfig, null);
+        }
+
+        // Выполняем действие
+        PostgreActionHandler.INSTANCE.executePostgresAction(query, result, cache.name,
+                vars, query.session, debugMode);
+    }
+
+    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
 
     private static JSONObject parseVarsFromBody(HttpExchange query) {
         JSONObject vars = new JSONObject();
@@ -184,57 +467,70 @@ public class cmpAction extends Base {
                     vars.put(key, wrapper);
                 }
             }
-        } catch (Exception e) { System.err.println("Error parsing JSON: " + e.getMessage()); }
+        } catch (Exception e) {
+            System.err.println("Error parsing JSON: " + e.getMessage());
+        }
         return vars;
     }
 
-    private static Object findActionInCache(String actionName) {
-        if (actionName == null || actionName.isEmpty()) return null;
-
-        // Поиск в кэшах действий
-        Object action = JavaActionHandler.INSTANCE.procedureList.get(actionName);
-        if (action != null) return action;
-        action = OracleActionHandler.INSTANCE.procedureList.get(actionName);
-        if (action != null) return action;
-        action = PostgreActionHandler.INSTANCE.procedureList.get(actionName);
-        if (action != null) return action;
-
-        // Поиск в кэшах функций (для вызова через action)
-        action = OracleFunctionHandler.INSTANCE.functionCache.get(actionName);
-        if (action != null) return action;
-        action = PostgreFunctionHandler.INSTANCE.functionCache.get(actionName);
-        if (action != null) return action;
-
-        // поиск по суффиксу
-        for (String key : JavaActionHandler.INSTANCE.procedureList.keySet())
-            if (key.endsWith("." + actionName)) return JavaActionHandler.INSTANCE.procedureList.get(key);
-        for (String key : OracleActionHandler.INSTANCE.procedureList.keySet())
-            if (key.endsWith("." + actionName)) return OracleActionHandler.INSTANCE.procedureList.get(key);
-        for (String key : PostgreActionHandler.INSTANCE.procedureList.keySet())
-            if (key.endsWith("." + actionName)) return PostgreActionHandler.INSTANCE.procedureList.get(key);
-        for (String key : OracleFunctionHandler.INSTANCE.functionCache.keySet())
-            if (key.endsWith("." + actionName)) return OracleFunctionHandler.INSTANCE.functionCache.get(key);
-        for (String key : PostgreFunctionHandler.INSTANCE.functionCache.keySet())
-            if (key.endsWith("." + actionName)) return PostgreFunctionHandler.INSTANCE.functionCache.get(key);
-
-        return null;
+    private static String getValueFromVars(JSONObject vars, Map<String, Object> session,
+                                           String name, String defaultValue) {
+        if (!vars.has(name)) return defaultValue;
+        Object val = vars.get(name);
+        if (val instanceof JSONObject) {
+            JSONObject obj = (JSONObject) val;
+            if ("session".equals(obj.optString("srctype"))) {
+                Object sessionVal = session.get(name);
+                return sessionVal != null ? sessionVal.toString() : obj.optString("defaultVal", defaultValue);
+            }
+            return obj.optString("value", obj.optString("defaultVal", defaultValue));
+        }
+        return val.toString();
     }
 
-    private static String resolveDbName(String requestDbName, String savedDbName) {
-        if ("DB".equals(requestDbName) && savedDbName != null && !"DB".equals(savedDbName))
-            return savedDbName;
-        return requestDbName;
+    private static void updateVars(JSONObject vars, Map<String, Object> session,
+                                   String name, String value, String srctype) {
+        if (vars.has(name) && vars.get(name) instanceof JSONObject) {
+            JSONObject obj = vars.getJSONObject(name);
+            if ("session".equals(srctype)) {
+                session.put(name, value);
+            } else {
+                obj.put("value", value);
+            }
+        } else {
+            JSONObject wrapper = new JSONObject();
+            wrapper.put("value", value);
+            wrapper.put("src", name);
+            wrapper.put("srctype", srctype != null ? srctype : "var");
+            vars.put(name, wrapper);
+        }
     }
 
     // ======================== ВНУТРЕННИЕ КЛАССЫ ========================
+
     public static class ActionConfig {
         public String name, dbName, queryType, schema, dbType, docPath, rootPath;
         public boolean isOracle;
         public DatabaseConfig dbConfig;
+        public String sqlContent;
+        public String javaCode;
+        public List<String> importPackets;
+        public List<String> jarResources;
+        public List<ActionVar> variables;
     }
 
-    public static class RequestParams {
-        public String queryType, actionName, pgSchema, dbName, dbType;
-        public boolean debugMode;
+    private static class ActionVar {
+        public String name, src, srctype, len, defaultVal, type, direction;
+    }
+
+    private static class ActionCache {
+        public String name, dbName, queryType, schema, dbType, docPath, rootPath;
+        public boolean isOracle;
+        public DatabaseConfig dbConfig;
+        public String sqlContent;
+        public String javaCode;
+        public List<String> importPackets;
+        public List<String> jarResources;
+        public List<ActionVar> variables;
     }
 }

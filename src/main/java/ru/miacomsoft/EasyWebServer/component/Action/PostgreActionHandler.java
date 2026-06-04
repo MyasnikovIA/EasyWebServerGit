@@ -21,24 +21,26 @@ public class PostgreActionHandler {
 
     public static final PostgreActionHandler INSTANCE = new PostgreActionHandler();
 
-    // Кэши PostgreSQL
+    // Кэш для действий PostgreSQL (имя -> параметры)
     public final Map<String, HashMap<String, Object>> procedureList = new ConcurrentHashMap<>();
-    private final Map<String, Boolean> functionExistsCache = new HashMap<>();
+
+    // Кэш для проверки существования процедур в БД
+    private final Map<String, Boolean> procedureExistsCache = new HashMap<>();
     private final Map<String, Boolean> schemaExistsCache = new HashMap<>();
     private final Map<String, Boolean> databaseExistsCache = new HashMap<>();
-    private final Map<String, String> functionContentHashCache = new ConcurrentHashMap<>();
+    private final Map<String, String> procedureContentHashCache = new ConcurrentHashMap<>();
     private final Map<String, Long> databaseCheckTimestamp = new HashMap<>();
     private static final long CACHE_TTL = 60000;
 
     private boolean debugMode = false;
-    private String currentContentHash;
     private DatabaseConfig currentDbConfig;
 
     private PostgreActionHandler() {}
 
-    // ========== ИНИЦИАЛИЗАЦИЯ ==========
+    // ========== ИНИЦИАЛИЗАЦИЯ (ТОЛЬКО СОХРАНЕНИЕ В КЭШ) ==========
     public void handlePostgreAction(Document doc, Element element, cmpAction.ActionConfig config, Base base) {
-        System.out.println("=== handlePostgreAction called for: " + config.name);
+        System.out.println("=== handlePostgreAction (cache only) for: " + config.name);
+
         if (config.dbConfig == null) {
             System.err.println("Database config not found for: " + config.dbName);
             element.empty();
@@ -46,220 +48,412 @@ public class PostgreActionHandler {
             element.removeAttr("style");
             return;
         }
+
         this.debugMode = (doc != null && doc.hasAttr("debug_mode") && Boolean.parseBoolean(doc.attr("debug_mode")));
         this.currentDbConfig = config.dbConfig;
 
-        initializeDatabase(config);
-        initializeSchema(config);
-
         String sqlContent = element.hasText() ? element.text().trim() : "";
-        String contentHash = getShortHash(sqlContent);
-        this.currentContentHash = contentHash;
-
-        String functionName = generateFunctionName(config, contentHash);
-        String fullFunctionName = config.schema + "." + functionName;
-
         List<PostgreVar> variables = parseVariables(element);
-        setComponentAttributes(config, functionName, variables);
 
-        HashMap<String, Object> param = null;
-        if (needsRecreation(fullFunctionName, contentHash, config)) {
-            param = createPostgresProcedure(fullFunctionName, config, functionName, sqlContent, element, doc, variables, contentHash);
-            updateFunctionHashCache(fullFunctionName, contentHash);
-        } else {
-            param = loadExistingProcedureToCache(fullFunctionName, config.schema, element);
-        }
+        // Только сохраняем в кэш - НЕ СОЗДАЁМ ПРОЦЕДУРУ
+        saveToCache(config.name, config, variables, sqlContent);
 
-        // Сохраняем под исходным именем действия (config.name) для поиска
-        if (param != null) {
-            procedureList.put(config.name, param);
-            System.out.println("Saved action under original name: " + config.name);
-        }
-
+        setComponentAttributes(element, config, variables);
         finalizeElement(element, config, base);
     }
 
-    // ========== ВЫПОЛНЕНИЕ ==========
+    /**
+     * Сохранение конфигурации действия в кэш без создания процедуры в БД
+     */
+    private void saveToCache(String name, cmpAction.ActionConfig config,
+                             List<PostgreVar> variables, String sqlContent) {
+        HashMap<String, Object> param = createBaseParam(variables, config);
+        param.put("SQL", sqlContent);
+        param.put("SQL_RAW", sqlContent);
+        param.put("dbConfig", config.dbConfig);
+        param.put("schema", config.schema);
+        param.put("dbName", config.dbName);
+        param.put("dbType", config.dbType);
+        param.put("query_type", "sql");
+        param.put("isOracle", false);
+        param.put("variables", variables);
+        param.put("contentHash", getShortHash(sqlContent));
+        param.put("procedureName", name);  // ДОБАВИТЬ - сохраняем имя процедуры
+
+        procedureList.put(name, param);
+        if (config.schema != null && !config.schema.isEmpty()) {
+            procedureList.put(config.schema + "." + name, param);
+        }
+
+        System.out.println("PostgreSQL action cached (not created yet): " + name);
+    }
+
+    // ========== ВЫПОЛНЕНИЕ (С ЛЕНИВЫМ СОЗДАНИЕМ ПРОЦЕДУРЫ) ==========
     public void executePostgresAction(HttpExchange query, JSONObject result, String actionName,
                                       JSONObject vars, Map<String, Object> session, boolean debugMode) {
         System.out.println("=== executePostgresAction: " + actionName + " ===");
-        if (!procedureList.containsKey(actionName)) {
-            result.put("ERROR", "Procedure not found: " + actionName);
+
+        HashMap<String, Object> param = findActionInCache(actionName);
+        if (param == null) {
+            result.put("ERROR", "Action not found: " + actionName);
             return;
         }
 
-        HashMap<String, Object> param = procedureList.get(actionName);
-        Map<String, String> varTypes = (Map<String, String>) param.get("varTypes");
-        Map<String, String> varDirections = (Map<String, String>) param.get("varDirections");
+        String schema = (String) param.get("schema");
+        String contentHash = (String) param.get("contentHash");
+        List<PostgreVar> variables = (List<PostgreVar>) param.get("variables");
         DatabaseConfig dbConfig = (DatabaseConfig) param.get("dbConfig");
-        if (dbConfig == null) dbConfig = ServerConstant.config.getDatabaseConfig("default");
+
+        // ИСПРАВЛЕНО: используем actionName как имя процедуры
+        String procedureName = actionName;
+
         if (dbConfig == null) {
             result.put("ERROR", "Database configuration not found");
             return;
         }
 
-        String schema = extractSchema(actionName);
-        String jdbcUrl = buildJdbcUrlWithSchema(dbConfig, schema);
-        Properties props = new Properties();
-        props.setProperty("user", dbConfig.getUsername());
-        props.setProperty("password", dbConfig.getPassword());
-        props.setProperty("currentSchema", schema);
+        boolean procedureExists = checkProcedureExistsInDB(dbConfig, schema, procedureName);
+        boolean needsRecreation = debugMode || !procedureExists || needsRecreationByHash(schema + "." + procedureName, contentHash);
 
-        List<String> varsArr = (List<String>) param.get("vars");
-        String prepareCall = (String) param.get("prepareCall");
+        if (needsRecreation) {
+            System.out.println("Creating/updating PostgreSQL procedure on first call: " + schema + "." + procedureName);
 
-        try (Connection conn = DriverManager.getConnection(jdbcUrl, props);
-             CallableStatement cs = conn.prepareCall(prepareCall)) {
-            conn.setAutoCommit(false);
-            setSearchPath(conn, schema);
+            String sqlContent = (String) param.get("SQL_RAW");
 
-            int idx = 1;
-            for (String vname : varsArr) {
-                String dir = varDirections != null ? varDirections.getOrDefault(vname, "IN") : "IN";
-                if ("OUT".equals(dir) || "INOUT".equals(dir))
-                    registerPostgresOutParameter(cs, idx, varTypes.getOrDefault(vname, "string"));
-                idx++;
+            if (!createOrReplaceProcedure(dbConfig, schema, procedureName, sqlContent, variables, contentHash)) {
+                result.put("ERROR", "Failed to create procedure: " + schema + "." + procedureName);
+                result.put("SQL", sqlContent);
+                return;
             }
-            idx = 1;
-            for (String vname : varsArr) {
-                String dir = varDirections != null ? varDirections.getOrDefault(vname, "IN") : "IN";
-                if ("IN".equals(dir) || "INOUT".equals(dir)) {
-                    String value = getValueFromVars(vars, session, vname);
-                    setPostgresParameter(cs, idx, value, varTypes.getOrDefault(vname, "string"), conn);
-                }
-                idx++;
-            }
-            cs.execute();
-            idx = 1;
-            for (String vname : varsArr) {
-                String dir = varDirections != null ? varDirections.getOrDefault(vname, "IN") : "IN";
-                if ("OUT".equals(dir) || "INOUT".equals(dir)) {
-                    String outValue = getPostgresOutParameter(cs, idx, varTypes.getOrDefault(vname, "string"));
-                    updateVars(vars, session, vname, outValue);
-                }
-                idx++;
-            }
-            conn.commit();
-            result.put("vars", vars);
-            if (debugMode && param.containsKey("SQL"))
-                result.put("SQL", ((String) param.get("SQL")).split("\n"));
-        } catch (SQLException e) {
-            result.put("ERROR", "SQL Error: " + e.getMessage());
-            e.printStackTrace();
-        } catch (Exception e) {
-            result.put("ERROR", "Error: " + e.getMessage());
-            e.printStackTrace();
+
+            updateProcedureHashCache(schema + "." + procedureName, contentHash);
         }
+
+        // ИСПРАВЛЕНО: передаём procedureName в param
+        param.put("procedureName", procedureName);
+
+        executeProcedure(query, result, param, vars, session, debugMode);
     }
 
-    // ========== МЕТОДЫ РАБОТЫ С POSTGRESQL ==========
-    public DatabaseConfig createDefaultPostgresConfig() {
-        String url = ServerConstant.config.DATABASE_NAME;
-        String user = ServerConstant.config.DATABASE_USER_NAME;
-        String pass = ServerConstant.config.DATABASE_USER_PASS;
-        if (url == null || url.isEmpty() || user == null || user.isEmpty()) return null;
+    /**
+     * Поиск действия в кэше по имени (с поддержкой схемы)
+     */
+    private HashMap<String, Object> findActionInCache(String actionName) {
+        // Прямой поиск
+        if (procedureList.containsKey(actionName)) {
+            return procedureList.get(actionName);
+        }
+
+        // Поиск с добавлением схемы public
+        if (procedureList.containsKey("public." + actionName)) {
+            return procedureList.get("public." + actionName);
+        }
+
+        // Поиск по суффиксу
+        for (Map.Entry<String, HashMap<String, Object>> entry : procedureList.entrySet()) {
+            String key = entry.getKey();
+            if (key.endsWith("." + actionName)) {
+                return entry.getValue();
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Проверка существования процедуры в БД (с кэшированием)
+     */
+    private boolean checkProcedureExistsInDB(DatabaseConfig dbConfig, String schema, String procedureName) {
+        String cacheKey = schema + "." + procedureName;
+
+        if (procedureExistsCache.containsKey(cacheKey)) {
+            return procedureExistsCache.get(cacheKey);
+        }
+
+        Connection conn = null;
         try {
-            DatabaseConfig cfg = new DatabaseConfig();
-            cfg.setType("jdbc");
-            cfg.setDriver("org.postgresql.Driver");
-            String withoutProtocol = url.substring(url.indexOf("://") + 3);
-            String[] parts = withoutProtocol.split("/", 2);
-            String hostPort = parts[0];
-            String database = parts.length > 1 ? parts[1] : "postgres";
-            String[] hp = hostPort.split(":");
-            cfg.setHost(hp[0]);
-            cfg.setPort(hp.length > 1 ? hp[1] : "5432");
-            cfg.setDatabase(database);
-            cfg.setUsername(user);
-            cfg.setPassword(pass);
-            cfg.setSchema("public");
-            return cfg;
-        } catch (Exception e) { return null; }
-    }
+            conn = getConnectionFromConfig(dbConfig);
+            if (conn == null) return false;
 
-    private void initializeDatabase(cmpAction.ActionConfig config) {
-        String targetDbName = config.dbConfig.getDatabase();
-        boolean dbExists = checkDatabaseExistsCached(targetDbName, config.dbConfig);
-        if (!dbExists && !debugMode) {
-            System.out.println("=== Creating database: " + targetDbName + " ===");
-            if (createDatabaseIfNotExists(targetDbName, config.dbConfig)) sleepQuietly(2000);
-        }
-    }
+            String sql = "SELECT EXISTS(" +
+                    "SELECT 1 FROM pg_proc p " +
+                    "JOIN pg_namespace n ON p.pronamespace = n.oid " +
+                    "WHERE n.nspname = ? AND p.proname = ?" +
+                    ")";
 
-    private void initializeSchema(cmpAction.ActionConfig config) {
-        boolean schemaExists = checkSchemaExistsCached(config.schema, config.dbName, config.dbConfig);
-        if (!schemaExists && !debugMode) {
-            System.out.println("=== Creating schema: " + config.schema + " ===");
-            if (createSchemaIfNotExists(config.schema, config.dbName, config.dbConfig)) sleepQuietly(1000);
-        }
-    }
-
-    private HashMap<String, Object> createPostgresProcedure(String fullFunctionName, cmpAction.ActionConfig config, String procName,
-                                                            String sqlContent, Element element, Document doc,
-                                                            List<PostgreVar> variables, String contentHash) {
-        Connection conn = connectToPostgres(config.dbConfig);
-        if (conn == null) return null;
-        String cleanName = sanitizeProcedureName(procName);
-        String signature = buildProcedureSignature(config.schema, cleanName, variables);
-        String body = buildProcedureBody(sqlContent, contentHash, element, doc);
-        String fullSQL = signature + "\n" + body;
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("DROP PROCEDURE IF EXISTS " + config.schema + "." + cleanName + " CASCADE");
-            stmt.execute(fullSQL);
-            return saveProcedureToCache(fullFunctionName, config.schema, cleanName, variables, sqlContent, contentHash, conn, config.name);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                ps.setString(2, procedureName);
+                ResultSet rs = ps.executeQuery();
+                boolean exists = rs.next() && rs.getBoolean(1);
+                procedureExistsCache.put(cacheKey, exists);
+                return exists;
+            }
         } catch (SQLException e) {
-            e.printStackTrace();
-            return null;
+            System.err.println("Error checking procedure existence: " + e.getMessage());
+            return false;
         } finally {
             closeConnectionQuietly(conn);
         }
     }
 
-    private HashMap<String, Object> saveProcedureToCache(String fullName, String schema, String procName,
-                                                         List<PostgreVar> variables, String sqlContent,
-                                                         String contentHash, Connection conn, String actionName) {
-        HashMap<String, Object> param = createBaseParam(variables, null);
-        param.put("SQL", sqlContent);
-        param.put("dbConfig", currentDbConfig);
-        param.put("contentHash", contentHash);
-        param.put("connect", conn);
-        StringBuilder placeholders = new StringBuilder();
-        for (int i = 0; i < variables.size(); i++) {
-            if (i > 0) placeholders.append(",");
-            placeholders.append("?");
-        }
-        param.put("prepareCall", "CALL " + schema + "." + procName + "(" + placeholders.toString() + ")");
-        procedureList.put(fullName, param);
-        procedureList.put(procName, param);
-        procedureList.put(actionName, param); // сохраняем под исходным именем действия
-        return param;
+    /**
+     * Проверка, нужно ли обновить процедуру по хэшу содержимого
+     */
+    private boolean needsRecreationByHash(String fullName, String currentHash) {
+        if (currentHash == null) return true;
+        String cachedHash = procedureContentHashCache.get(fullName);
+        return cachedHash == null || !cachedHash.equals(currentHash);
     }
 
-    private HashMap<String, Object> loadExistingProcedureToCache(String fullName, String schema, Element element) {
-        List<PostgreVar> variables = parseVariables(element);
-        HashMap<String, Object> param = createBaseParam(variables, null);
-        param.put("SQL", element.hasText() ? element.text().trim() : "");
-        param.put("dbConfig", currentDbConfig);
-        String procName = fullName.contains(".") ? fullName.substring(fullName.lastIndexOf('.') + 1) : fullName;
-        StringBuilder placeholders = new StringBuilder();
-        for (int i = 0; i < variables.size(); i++) {
-            if (i > 0) placeholders.append(",");
-            placeholders.append("?");
-        }
-        param.put("prepareCall", "CALL " + schema + "." + procName + "(" + placeholders.toString() + ")");
-        procedureList.put(fullName, param);
-        procedureList.put(procName, param);
-        // здесь actionName не передаётся, но позже в handlePostgreAction добавим под именем config.name
-        return param;
+    /**
+     * Обновление кэша хэша процедуры
+     */
+    private void updateProcedureHashCache(String name, String hash) {
+        procedureContentHashCache.put(name, hash);
     }
 
-    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (парсинг, кэширование, утилиты) ==========
+    /**
+     * Создание или замена процедуры в БД
+     */
+    private boolean createOrReplaceProcedure(DatabaseConfig dbConfig, String schema, String procedureName,
+                                             String sqlContent, List<PostgreVar> variables, String contentHash) {
+        Connection conn = null;
+        try {
+            conn = getConnectionFromConfig(dbConfig);
+            if (conn == null) return false;
+
+            String cleanName = sanitizeName(procedureName);  // используем procedureName, а не что-то другое
+            String signature = buildProcedureSignature(schema, cleanName, variables);
+            String body = buildProcedureBody(sqlContent, contentHash);
+            String fullSQL = signature + "\n" + body;
+
+            System.out.println("Creating procedure with SQL:\n" + fullSQL);  // ДЛЯ ОТЛАДКИ
+
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("DROP PROCEDURE IF EXISTS " + schema + "." + cleanName + " CASCADE");
+                stmt.execute(fullSQL);
+                conn.commit();
+                System.out.println("PostgreSQL procedure created: " + schema + "." + cleanName);
+                return true;
+            }
+        } catch (SQLException e) {
+            System.err.println("Error creating procedure: " + e.getMessage());
+            rollbackQuietly(conn);
+            return false;
+        } finally {
+            closeConnectionQuietly(conn);
+        }
+    }
+
+    /**
+     * Выполнение процедуры
+     */
+    private void executeProcedure(HttpExchange query, JSONObject result, HashMap<String, Object> param,
+                                  JSONObject vars, Map<String, Object> session, boolean debugMode) {
+        String schema = (String) param.get("schema");
+        String procedureName = (String) param.get("procedureName");  // ИЗМЕНИТЬ - брать из param
+        if (procedureName == null) {
+            procedureName = (String) param.get("dbName");
+        }
+        if (procedureName == null) {
+            procedureName = (String) param.get("name");
+        }
+        if (procedureName == null) {
+            procedureName = "procedure";
+        }
+
+        List<PostgreVar> variables = (List<PostgreVar>) param.get("variables");
+        DatabaseConfig dbConfig = (DatabaseConfig) param.get("dbConfig");
+
+        if (variables == null) variables = new ArrayList<>();
+
+        Connection conn = null;
+        CallableStatement cs = null;
+
+        try {
+            String jdbcUrl = buildJdbcUrlWithSchema(dbConfig, schema);
+            Properties props = new Properties();
+            props.setProperty("user", dbConfig.getUsername());
+            props.setProperty("password", dbConfig.getPassword());
+            props.setProperty("currentSchema", schema);
+            conn = DriverManager.getConnection(jdbcUrl, props);
+            conn.setAutoCommit(false);
+
+            setSearchPath(conn, schema);
+
+            // ИСПРАВЛЕНО: используем правильное имя процедуры
+            StringBuilder placeholders = new StringBuilder();
+            for (int i = 0; i < variables.size(); i++) {
+                if (i > 0) placeholders.append(",");
+                placeholders.append("?");
+            }
+
+            String callSql = "CALL " + schema + "." + procedureName + "(" + placeholders.toString() + ")";
+            System.out.println("Call SQL: " + callSql);  // ДЛЯ ОТЛАДКИ
+
+            cs = conn.prepareCall(callSql);
+
+            // Регистрируем OUT параметры
+            int idx = 1;
+            for (PostgreVar var : variables) {
+                if ("OUT".equals(var.direction) || "INOUT".equals(var.direction)) {
+                    registerOutParameter(cs, idx, var.type);
+                }
+                idx++;
+            }
+
+            // Устанавливаем IN параметры
+            idx = 1;
+            for (PostgreVar var : variables) {
+                if ("IN".equals(var.direction) || "INOUT".equals(var.direction)) {
+                    String value = getValueFromVars(vars, session, var.name, var.defaultVal);
+                    setParameter(cs, idx, value, var.type, conn);
+                }
+                idx++;
+            }
+
+            cs.execute();
+            conn.commit();
+
+            // Получаем OUT параметры
+            idx = 1;
+            for (PostgreVar var : variables) {
+                if ("OUT".equals(var.direction) || "INOUT".equals(var.direction)) {
+                    String outValue = getOutParameter(cs, idx, var.type);
+                    updateVars(vars, session, var.name, outValue, var.srctype);
+                }
+                idx++;
+            }
+
+            result.put("vars", vars);
+            if (debugMode) {
+                result.put("procedure", schema + "." + procedureName);
+                result.put("call_sql", callSql);
+                if (param.containsKey("SQL")) {
+                    result.put("SQL", param.get("SQL"));
+                }
+            }
+
+        } catch (SQLException e) {
+            result.put("ERROR", "SQL Error: " + e.getMessage());
+            e.printStackTrace();
+            rollbackQuietly(conn);
+        } catch (Exception e) {
+            result.put("ERROR", "Error: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            try { if (cs != null) cs.close(); } catch (Exception ignore) {}
+            closeConnectionQuietly(conn);
+        }
+    }
+
+    // ========== РАБОТА С БАЗОЙ ДАННЫХ ==========
+
+    private void ensureDatabaseExists(DatabaseConfig dbConfig) {
+        String dbName = dbConfig.getDatabase();
+        if (!checkDatabaseExists(dbName, dbConfig) && !debugMode) {
+            System.out.println("=== Creating database: " + dbName + " ===");
+            createDatabase(dbName, dbConfig);
+            sleepQuietly(2000);
+        }
+    }
+
+    private void ensureSchemaExists(String schema, DatabaseConfig dbConfig) {
+        if (!checkSchemaExists(schema, dbConfig) && !debugMode) {
+            System.out.println("=== Creating schema: " + schema + " ===");
+            createSchema(schema, dbConfig);
+            sleepQuietly(1000);
+        }
+    }
+
+    private boolean checkDatabaseExists(String dbName, DatabaseConfig dbConfig) {
+        String key = "db:" + dbName;
+        if (databaseExistsCache.containsKey(key)) {
+            Long ts = databaseCheckTimestamp.get(key);
+            if (ts != null && System.currentTimeMillis() - ts < CACHE_TTL) {
+                return databaseExistsCache.get(key);
+            }
+        }
+
+        String adminUrl = "jdbc:postgresql://" + dbConfig.getHost() + ":" + dbConfig.getPort() + "/postgres";
+        try (Connection conn = createSimpleConnection(adminUrl, dbConfig);
+             PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM pg_database WHERE datname = ?")) {
+            ps.setString(1, dbName);
+            boolean exists = ps.executeQuery().next();
+            databaseExistsCache.put(key, exists);
+            databaseCheckTimestamp.put(key, System.currentTimeMillis());
+            return exists;
+        } catch (SQLException e) {
+            System.err.println("Error checking database existence: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean createDatabase(String dbName, DatabaseConfig dbConfig) {
+        String adminUrl = "jdbc:postgresql://" + dbConfig.getHost() + ":" + dbConfig.getPort() + "/postgres";
+        try (Connection conn = createSimpleConnection(adminUrl, dbConfig);
+             Statement stmt = conn.createStatement()) {
+            conn.setAutoCommit(true);
+            String sql = String.format("CREATE DATABASE \"%s\" WITH OWNER = \"%s\" ENCODING = 'UTF8'",
+                    dbName.replace("\"", "\"\""), dbConfig.getUsername().replace("\"", "\"\""));
+            stmt.executeUpdate(sql);
+            databaseExistsCache.put("db:" + dbName, true);
+            return true;
+        } catch (SQLException e) {
+            if (e.getMessage().contains("already exists")) {
+                databaseExistsCache.put("db:" + dbName, true);
+                return true;
+            }
+            System.err.println("Error creating database: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean checkSchemaExists(String schema, DatabaseConfig dbConfig) {
+        String key = "schema:" + schema;
+        if (schemaExistsCache.containsKey(key)) {
+            return schemaExistsCache.get(key);
+        }
+
+        try (Connection conn = getConnectionFromConfig(dbConfig);
+             PreparedStatement ps = conn.prepareStatement("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = ?)")) {
+            ps.setString(1, schema);
+            ResultSet rs = ps.executeQuery();
+            boolean exists = rs.next() && rs.getBoolean(1);
+            schemaExistsCache.put(key, exists);
+            return exists;
+        } catch (SQLException e) {
+            System.err.println("Error checking schema existence: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean createSchema(String schema, DatabaseConfig dbConfig) {
+        try (Connection conn = getConnectionFromConfig(dbConfig);
+             Statement stmt = conn.createStatement()) {
+            conn.setAutoCommit(false);
+            String sql = String.format("CREATE SCHEMA IF NOT EXISTS \"%s\" AUTHORIZATION \"%s\"",
+                    schema.replace("\"", "\"\""), dbConfig.getUsername().replace("\"", "\"\""));
+            stmt.executeUpdate(sql);
+            conn.commit();
+            schemaExistsCache.put("schema:" + schema, true);
+            return true;
+        } catch (SQLException e) {
+            System.err.println("Error creating schema: " + e.getMessage());
+            return false;
+        }
+    }
+
+    // ========== ПАРСИНГ ПЕРЕМЕННЫХ ==========
+
     private List<PostgreVar> parseVariables(Element element) {
         List<PostgreVar> vars = new ArrayList<>();
         for (Element child : element.children()) {
             String tag = child.tag().toString().toLowerCase();
-            if (tag.contains("var") || tag.contains("cmpactionvar"))
+            if (tag.contains("var") || tag.contains("cmpactionvar")) {
                 vars.add(parseActionVar(child));
+            }
         }
         return vars;
     }
@@ -268,11 +462,11 @@ public class PostgreActionHandler {
         Attributes attrs = element.attributes();
         PostgreVar var = new PostgreVar();
         var.name = attrs.get("name");
-        var.src = baseRemoveArrKeyRtrn(attrs, "src", var.name);
-        var.srctype = baseRemoveArrKeyRtrn(attrs, "srctype", "var");
-        var.len = baseRemoveArrKeyRtrn(attrs, "len", "");
-        var.defaultVal = baseRemoveArrKeyRtrn(attrs, "default", "");
-        var.type = baseRemoveArrKeyRtrn(attrs, "type", "string");
+        var.src = removeAttr(attrs, "src", var.name);
+        var.srctype = removeAttr(attrs, "srctype", "var");
+        var.len = removeAttr(attrs, "len", "");
+        var.defaultVal = removeAttr(attrs, "default", "");
+        var.type = removeAttr(attrs, "type", "string");
         String put = attrs.hasKey("put") ? attrs.get("put") : null;
         String get = attrs.hasKey("get") ? attrs.get("get") : null;
         var.direction = (put != null && get != null) ? "INOUT" : (put != null ? "OUT" : "IN");
@@ -293,20 +487,31 @@ public class PostgreActionHandler {
         param.put("varTypes", types);
         param.put("varDirections", dirs);
         if (config != null) param.put("dbType", config.dbType);
+        param.put("name", config != null ? config.name : null);
+        param.put("key", config != null ? config.name : null);
         return param;
     }
 
-    private void setComponentAttributes(cmpAction.ActionConfig config, String functionName, List<PostgreVar> variables) {
-        // Не используется, атрибуты устанавливаются через element в handlePostgreAction
+    private void setComponentAttributes(Element element, cmpAction.ActionConfig config, List<PostgreVar> variables) {
+        element.attr("style", "display:none");
+        element.attr("action_name", config.name);
+        element.attr("name", config.name);
+        element.attr("vars", buildVarsJson(variables));
+        element.attr("query_type", config.queryType);
+        element.attr("db_type", config.dbType);
+        element.attr("pg_schema", config.schema);
+        element.attr("db", config.dbName);
     }
 
     private void finalizeElement(Element element, cmpAction.ActionConfig config, Base base) {
         element.empty();
-        base.attr("query_type", config.queryType);
-        base.attr("db_type", config.dbType);
-        base.attr("pg_schema", config.schema);
-        base.attr("db", config.dbName);
-        base.attr("name", config.name);
+        if (base != null) {
+            base.attr("query_type", config.queryType);
+            base.attr("db_type", config.dbType);
+            base.attr("pg_schema", config.schema);
+            base.attr("db", config.dbName);
+            base.attr("name", config.name);
+        }
     }
 
     private String buildVarsJson(List<PostgreVar> variables) {
@@ -328,167 +533,41 @@ public class PostgreActionHandler {
         return json.toString();
     }
 
-    private String generateFunctionName(cmpAction.ActionConfig config, String contentHash) {
-        String relativePath = getRelativePath(config.docPath, config.rootPath);
-        String pathHash = getMd5Hash(relativePath);
-        if (pathHash.length() > 8) pathHash = pathHash.substring(0, 8);
-        if (pathHash.length() > 0 && Character.isDigit(pathHash.charAt(0))) pathHash = "f" + pathHash;
-        String baseName = pathHash + "_" + contentHash + "_" + config.name;
-        if (baseName.length() > 60) baseName = baseName.substring(0, 60);
-        if (baseName.length() > 0 && Character.isDigit(baseName.charAt(0))) baseName = "f_" + baseName;
-        return baseName.toLowerCase();
-    }
-
-    private String getRelativePath(String docPath, String rootPath) {
-        if (docPath.length() <= rootPath.length() || docPath.length() <= 5) return "";
-        return docPath.substring(rootPath.length(), docPath.length() - 5).replaceAll("[/\\\\]", "_").replaceAll("[^a-zA-Z0-9_]", "");
-    }
-
-    private String getShortHash(String input) {
-        String hash = getMd5Hash(input);
-        return hash.length() > 12 ? hash.substring(0, 12) : hash;
-    }
-
-    private String getMd5Hash(String input) {
-        try {
-            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception e) { return String.valueOf(input.hashCode()); }
-    }
-
-    private boolean needsRecreation(String functionName, String currentHash, cmpAction.ActionConfig config) {
-        if (debugMode) return true;
-        String cachedHash = functionContentHashCache.get(functionName);
-        if (cachedHash == null) return true;
-        if (!cachedHash.equals(currentHash)) return true;
-        if (!checkFunctionExistsInDB(functionName, config.schema, config.dbConfig)) return true;
-        return false;
-    }
-
-    private void updateFunctionHashCache(String name, String hash) {
-        functionContentHashCache.put(name, hash);
-    }
-
-    private boolean checkDatabaseExistsCached(String dbName, DatabaseConfig dbConfig) {
-        String key = "db:" + dbName;
-        if (databaseExistsCache.containsKey(key)) {
-            Long ts = databaseCheckTimestamp.get(key);
-            if (ts != null && System.currentTimeMillis() - ts < CACHE_TTL)
-                return databaseExistsCache.get(key);
-        }
-        boolean exists = checkDatabaseExistsDirect(dbName, dbConfig);
-        databaseExistsCache.put(key, exists);
-        databaseCheckTimestamp.put(key, System.currentTimeMillis());
-        return exists;
-    }
-
-    private boolean checkDatabaseExistsDirect(String dbName, DatabaseConfig dbConfig) {
-        String adminUrl = "jdbc:postgresql://" + dbConfig.getHost() + ":" + dbConfig.getPort() + "/postgres";
-        try (Connection conn = createSimpleConnection(adminUrl, dbConfig);
-             PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM pg_database WHERE datname = ?")) {
-            ps.setString(1, dbName);
-            try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
-        } catch (SQLException e) { return false; }
-    }
-
-    private boolean createDatabaseIfNotExists(String dbName, DatabaseConfig dbConfig) {
-        String adminUrl = "jdbc:postgresql://" + dbConfig.getHost() + ":" + dbConfig.getPort() + "/postgres";
-        try (Connection conn = createSimpleConnection(adminUrl, dbConfig)) {
-            conn.setAutoCommit(true);
-            String sql = String.format("CREATE DATABASE \"%s\" WITH OWNER = \"%s\" ENCODING = 'UTF8'",
-                    dbName.replace("\"", "\"\""), dbConfig.getUsername().replace("\"", "\"\""));
-            try (Statement stmt = conn.createStatement()) { stmt.executeUpdate(sql); return true; }
-        } catch (SQLException e) { return e.getMessage().contains("already exists"); }
-    }
-
-    private boolean checkSchemaExistsCached(String schemaName, String dbName, DatabaseConfig dbConfig) {
-        String key = dbName + ":schema:" + schemaName;
-        if (schemaExistsCache.containsKey(key)) return schemaExistsCache.get(key);
-        boolean exists = checkSchemaExistsDirect(schemaName, dbConfig);
-        schemaExistsCache.put(key, exists);
-        return exists;
-    }
-
-    private boolean checkSchemaExistsDirect(String schemaName, DatabaseConfig dbConfig) {
-        try (Connection conn = createSimpleConnection(dbConfig.getJdbcUrl(), dbConfig);
-             PreparedStatement ps = conn.prepareStatement("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = ?)")) {
-            ps.setString(1, schemaName);
-            try (ResultSet rs = ps.executeQuery()) { return rs.next() && rs.getBoolean(1); }
-        } catch (SQLException e) { return false; }
-    }
-
-    private boolean createSchemaIfNotExists(String schemaName, String dbName, DatabaseConfig dbConfig) {
-        try (Connection conn = createSimpleConnection(dbConfig.getJdbcUrl(), dbConfig)) {
-            conn.setAutoCommit(false);
-            String sql = String.format("CREATE SCHEMA IF NOT EXISTS \"%s\" AUTHORIZATION \"%s\"",
-                    schemaName.replace("\"", "\"\""), dbConfig.getUsername().replace("\"", "\"\""));
-            try (Statement stmt = conn.createStatement()) { stmt.executeUpdate(sql); conn.commit(); return true; }
-        } catch (SQLException e) { return false; }
-    }
-
-    private boolean checkFunctionExistsInDB(String functionName, String schema, DatabaseConfig dbConfig) {
-        String cleanName = functionName.contains(".") ? functionName.substring(functionName.lastIndexOf('.')+1) : functionName;
-        try (Connection conn = createSimpleConnection(dbConfig.getJdbcUrl(), dbConfig);
-             PreparedStatement ps = conn.prepareStatement("SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = ? AND p.proname = ?)")) {
-            ps.setString(1, schema);
-            ps.setString(2, cleanName);
-            try (ResultSet rs = ps.executeQuery()) { return rs.next() && rs.getBoolean(1); }
-        } catch (SQLException e) { return false; }
-    }
-
-    private Connection createSimpleConnection(String url, DatabaseConfig dbConfig) throws SQLException {
-        Properties props = new Properties();
-        props.setProperty("user", dbConfig.getUsername());
-        props.setProperty("password", dbConfig.getPassword());
-        props.setProperty("connectTimeout", "10");
-        return DriverManager.getConnection(url, props);
-    }
-
-    private Connection connectToPostgres(DatabaseConfig dbConfig) {
-        try {
-            Class.forName("org.postgresql.Driver");
-            Properties props = new Properties();
-            props.setProperty("user", dbConfig.getUsername());
-            props.setProperty("password", dbConfig.getPassword());
-            return DriverManager.getConnection(dbConfig.getJdbcUrl(), props);
-        } catch (Exception e) { return null; }
-    }
-
-    private void closeConnectionQuietly(Connection conn) {
-        try { if (conn != null) conn.close(); } catch (SQLException ignored) {}
-    }
-
-    private void sleepQuietly(long millis) {
-        try { Thread.sleep(millis); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-    }
-
-    private String sanitizeProcedureName(String name) {
-        String clean = name.replaceAll("[^a-zA-Z0-9_]", "");
-        if (clean.length() > 0 && Character.isDigit(clean.charAt(0))) clean = "f_" + clean;
-        return clean;
-    }
+    // ========== ГЕНЕРАЦИЯ ИМЁН И ХЭШЕЙ ==========
 
     private String buildProcedureSignature(String schema, String procName, List<PostgreVar> variables) {
         StringBuilder params = new StringBuilder();
         for (PostgreVar var : variables) {
             String sqlType = mapJavaTypeToSqlType(var.type, var.len);
-            params.append(var.name).append(" ").append(var.direction).append(" ").append(sqlType).append(",");
+            String direction = "";
+            if ("OUT".equals(var.direction)) {
+                direction = "OUT ";
+            } else if ("INOUT".equals(var.direction)) {
+                direction = "INOUT ";
+            }
+            params.append(var.name).append(" ").append(direction).append(sqlType).append(",");
         }
-        String paramsStr = params.length() > 0 ? params.substring(0, params.length()-1) : "";
+        String paramsStr = params.length() > 0 ? params.substring(0, params.length() - 1) : "";
         return "CREATE OR REPLACE PROCEDURE " + schema + "." + procName + "(" + paramsStr + ")\nLANGUAGE plpgsql\nAS $$";
     }
 
-    private String buildProcedureBody(String sqlContent, String contentHash, Element element, Document doc) {
+    private String buildProcedureBody(String sqlContent, String contentHash) {
         StringBuilder body = new StringBuilder();
         body.append("BEGIN\n");
-        body.append("-- fileName: ").append(getFileName(doc)).append("\n");
         body.append("-- contentHash: ").append(contentHash).append("\n");
-        body.append(sqlContent);
-        if (!sqlContent.endsWith(";") && !sqlContent.endsWith("\n")) body.append(";\n");
-        body.append("\nEND;\n$$");
+
+        // Разбиваем SQL на отдельные statements
+        String[] statements = sqlContent.split(";(?=\\s*\\w+\\s+)");
+        for (String stmt : statements) {
+            String trimmed = stmt.trim();
+            if (!trimmed.isEmpty()) {
+                body.append(trimmed);
+                if (!trimmed.endsWith(";")) body.append(";");
+                body.append("\n");
+            }
+        }
+
+        body.append("END;\n$$");
         return body.toString();
     }
 
@@ -508,60 +587,101 @@ public class PostgreActionHandler {
         }
     }
 
-    private String getFileName(Document doc) {
-        if (doc == null) return "unknown";
-        String path = doc.attr("doc_path");
-        int lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-        return lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
+    private String getShortHash(String input) {
+        String hash = getMd5Hash(input);
+        return hash.length() > 12 ? hash.substring(0, 12) : hash;
     }
 
-    private String escapeJson(String s) { return s.replace("'", "\\\\'"); }
-    private String baseRemoveArrKeyRtrn(Attributes arr, String key, String defaultValue) {
-        if (arr.hasKey(key)) { String val = arr.get(key); arr.remove(key); return val; }
-        return defaultValue;
-    }
-
-    private String getValueFromVars(JSONObject vars, Map<String, Object> session, String name) {
-        if (!vars.has(name)) return "";
-        Object val = vars.get(name);
-        if (val instanceof JSONObject) {
-            JSONObject obj = (JSONObject) val;
-            if ("session".equals(obj.optString("srctype"))) {
-                Object sessionVal = session.get(name);
-                return sessionVal != null ? sessionVal.toString() : obj.optString("defaultVal", "");
-            }
-            return obj.optString("value", obj.optString("defaultVal", ""));
-        }
-        return val.toString();
-    }
-
-    private void updateVars(JSONObject vars, Map<String, Object> session, String name, String value) {
-        if (vars.has(name) && vars.get(name) instanceof JSONObject) {
-            JSONObject obj = vars.getJSONObject(name);
-            if ("session".equals(obj.optString("srctype")))
-                session.put(name, value);
-            else
-                obj.put("value", value);
-        } else {
-            JSONObject wrapper = new JSONObject();
-            wrapper.put("value", value);
-            wrapper.put("src", name);
-            wrapper.put("srctype", "var");
-            vars.put(name, wrapper);
+    private String getMd5Hash(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return String.valueOf(input.hashCode());
         }
     }
 
-    private String extractSchema(String fullActionName) {
-        if (fullActionName.contains(".")) return fullActionName.substring(0, fullActionName.lastIndexOf('.'));
-        return "public";
+    private String sanitizeName(String name) {
+        String clean = name.replaceAll("[^a-zA-Z0-9_]", "");
+        if (clean.length() > 0 && Character.isDigit(clean.charAt(0))) clean = "f_" + clean;
+        if (clean.length() > 60) clean = clean.substring(0, 60);
+        return clean;
+    }
+
+    // ========== ВСПОМОГАТЕЛЬНЫЕ УТИЛИТЫ ==========
+
+    public DatabaseConfig createDefaultPostgresConfig() {
+        String url = ServerConstant.config.DATABASE_NAME;
+        String user = ServerConstant.config.DATABASE_USER_NAME;
+        String pass = ServerConstant.config.DATABASE_USER_PASS;
+        if (url == null || url.isEmpty() || user == null || user.isEmpty()) return null;
+        try {
+            DatabaseConfig cfg = new DatabaseConfig();
+            cfg.setType("jdbc");
+            cfg.setDriver("org.postgresql.Driver");
+            String withoutProtocol = url.substring(url.indexOf("://") + 3);
+            String[] parts = withoutProtocol.split("/", 2);
+            String hostPort = parts[0];
+            String database = parts.length > 1 ? parts[1] : "postgres";
+            String[] hp = hostPort.split(":");
+            cfg.setHost(hp[0]);
+            cfg.setPort(hp.length > 1 ? hp[1] : "5432");
+            cfg.setDatabase(database);
+            cfg.setUsername(user);
+            cfg.setPassword(pass);
+            cfg.setSchema("public");
+            return cfg;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Connection getConnectionFromConfig(DatabaseConfig dbConfig) {
+        try {
+            Class.forName("org.postgresql.Driver");
+            Properties props = new Properties();
+            props.setProperty("user", dbConfig.getUsername());
+            props.setProperty("password", dbConfig.getPassword());
+            props.setProperty("connectTimeout", "10");
+            Connection conn = DriverManager.getConnection(dbConfig.getJdbcUrl(), props);
+            conn.setAutoCommit(false);
+            return conn;
+        } catch (Exception e) {
+            System.err.println("Connection error: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private Connection createSimpleConnection(String url, DatabaseConfig dbConfig) throws SQLException {
+        Properties props = new Properties();
+        props.setProperty("user", dbConfig.getUsername());
+        props.setProperty("password", dbConfig.getPassword());
+        return DriverManager.getConnection(url, props);
+    }
+
+    private void closeConnectionQuietly(Connection conn) {
+        try { if (conn != null) conn.close(); } catch (SQLException ignored) {}
+    }
+
+    private void rollbackQuietly(Connection conn) {
+        if (conn != null) {
+            try { conn.rollback(); } catch (SQLException ignored) {}
+        }
+    }
+
+    private void sleepQuietly(long millis) {
+        try { Thread.sleep(millis); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     private String buildJdbcUrlWithSchema(DatabaseConfig dbConfig, String schema) {
-        String jdbcUrl = dbConfig.getJdbcUrl();
-        if (!jdbcUrl.contains("currentSchema")) {
-            jdbcUrl += (jdbcUrl.contains("?") ? "&" : "?") + "currentSchema=" + schema;
+        String url = dbConfig.getJdbcUrl();
+        if (!url.contains("currentSchema")) {
+            url += (url.contains("?") ? "&" : "?") + "currentSchema=" + schema;
         }
-        return jdbcUrl;
+        return url;
     }
 
     private void setSearchPath(Connection conn, String schema) throws SQLException {
@@ -570,29 +690,7 @@ public class PostgreActionHandler {
         }
     }
 
-    private void setPostgresParameter(CallableStatement cs, int idx, String value, String type, Connection conn) throws SQLException {
-        if (value == null || value.isEmpty()) { cs.setNull(idx, Types.VARCHAR); return; }
-        switch (type.toLowerCase()) {
-            case "int": case "integer": cs.setInt(idx, Integer.parseInt(value)); break;
-            case "long": case "bigint": cs.setLong(idx, Long.parseLong(value)); break;
-            case "decimal": case "numeric": cs.setBigDecimal(idx, new BigDecimal(value)); break;
-            case "bool": case "boolean": cs.setBoolean(idx, Boolean.parseBoolean(value)); break;
-            case "date": cs.setDate(idx, Date.valueOf(value)); break;
-            case "timestamp": cs.setTimestamp(idx, Timestamp.valueOf(value.replace("T", " "))); break;
-            case "json": case "jsonb": cs.setObject(idx, value, Types.OTHER); break;
-            case "array":
-                try {
-                    JSONArray arr = new JSONArray(value);
-                    String[] strs = new String[arr.length()];
-                    for (int i = 0; i < arr.length(); i++) strs[i] = arr.getString(i);
-                    cs.setArray(idx, conn.createArrayOf("text", strs));
-                } catch (Exception e) { cs.setString(idx, value); }
-                break;
-            default: cs.setString(idx, value);
-        }
-    }
-
-    private void registerPostgresOutParameter(CallableStatement cs, int idx, String type) throws SQLException {
+    private void registerOutParameter(CallableStatement cs, int idx, String type) throws SQLException {
         switch (type.toLowerCase()) {
             case "int": case "integer": cs.registerOutParameter(idx, Types.INTEGER); break;
             case "long": case "bigint": cs.registerOutParameter(idx, Types.BIGINT); break;
@@ -601,12 +699,28 @@ public class PostgreActionHandler {
             case "date": cs.registerOutParameter(idx, Types.DATE); break;
             case "timestamp": cs.registerOutParameter(idx, Types.TIMESTAMP); break;
             case "json": case "jsonb": cs.registerOutParameter(idx, Types.OTHER); break;
-            case "array": cs.registerOutParameter(idx, Types.ARRAY); break;
             default: cs.registerOutParameter(idx, Types.VARCHAR);
         }
     }
 
-    private String getPostgresOutParameter(CallableStatement cs, int idx, String type) throws SQLException {
+    private void setParameter(CallableStatement cs, int idx, String value, String type, Connection conn) throws SQLException {
+        if (value == null || value.isEmpty()) {
+            cs.setNull(idx, Types.VARCHAR);
+            return;
+        }
+        switch (type.toLowerCase()) {
+            case "int": case "integer": cs.setInt(idx, Integer.parseInt(value)); break;
+            case "long": case "bigint": cs.setLong(idx, Long.parseLong(value)); break;
+            case "decimal": case "numeric": cs.setBigDecimal(idx, new BigDecimal(value)); break;
+            case "bool": case "boolean": cs.setBoolean(idx, Boolean.parseBoolean(value)); break;
+            case "date": cs.setDate(idx, Date.valueOf(value)); break;
+            case "timestamp": cs.setTimestamp(idx, Timestamp.valueOf(value.replace("T", " "))); break;
+            case "json": case "jsonb": cs.setObject(idx, value, Types.OTHER); break;
+            default: cs.setString(idx, value);
+        }
+    }
+
+    private String getOutParameter(CallableStatement cs, int idx, String type) throws SQLException {
         switch (type.toLowerCase()) {
             case "int": case "integer": return cs.wasNull() ? "" : String.valueOf(cs.getInt(idx));
             case "long": case "bigint": return cs.wasNull() ? "" : String.valueOf(cs.getLong(idx));
@@ -616,22 +730,58 @@ public class PostgreActionHandler {
             case "bool": case "boolean": return cs.wasNull() ? "" : String.valueOf(cs.getBoolean(idx));
             case "date": Date d = cs.getDate(idx); return d == null ? "" : d.toString();
             case "timestamp": Timestamp ts = cs.getTimestamp(idx); return ts == null ? "" : ts.toString();
-            case "json": case "jsonb":
-                Object o = cs.getObject(idx);
-                return o == null ? "" : o.toString();
-            case "array":
-                Array a = cs.getArray(idx);
-                if (a == null) return "";
-                Object[] arr = (Object[]) a.getArray();
-                JSONArray ja = new JSONArray();
-                for (Object item : arr) ja.put(item != null ? item.toString() : null);
-                return ja.toString();
             default:
                 String s = cs.getString(idx);
                 return s == null ? "" : s;
         }
     }
-    
+
+    private String getValueFromVars(JSONObject vars, Map<String, Object> session, String name, String defaultValue) {
+        if (!vars.has(name)) return defaultValue != null ? defaultValue : "";
+        Object val = vars.get(name);
+        if (val instanceof JSONObject) {
+            JSONObject obj = (JSONObject) val;
+            if ("session".equals(obj.optString("srctype"))) {
+                Object sessionVal = session.get(name);
+                return sessionVal != null ? sessionVal.toString() : obj.optString("defaultVal", defaultValue);
+            }
+            return obj.optString("value", obj.optString("defaultVal", defaultValue));
+        }
+        return val.toString();
+    }
+
+    private void updateVars(JSONObject vars, Map<String, Object> session, String name, String value, String srctype) {
+        if (vars.has(name) && vars.get(name) instanceof JSONObject) {
+            JSONObject obj = vars.getJSONObject(name);
+            if ("session".equals(srctype)) {
+                session.put(name, value);
+            } else {
+                obj.put("value", value);
+            }
+        } else {
+            JSONObject wrapper = new JSONObject();
+            wrapper.put("value", value);
+            wrapper.put("src", name);
+            wrapper.put("srctype", srctype != null ? srctype : "var");
+            vars.put(name, wrapper);
+        }
+    }
+
+    private String escapeJson(String s) {
+        return s.replace("'", "\\\\'");
+    }
+
+    private String removeAttr(Attributes attrs, String key, String defaultValue) {
+        if (attrs.hasKey(key)) {
+            String val = attrs.get(key);
+            attrs.remove(key);
+            return val;
+        }
+        return defaultValue;
+    }
+
+    // ========== ВНУТРЕННИЙ КЛАСС ==========
+
     private static class PostgreVar {
         String name, src, srctype, len, defaultVal, type, direction;
     }

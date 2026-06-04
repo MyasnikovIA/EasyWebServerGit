@@ -7,64 +7,12 @@ public class cmpAction_js {
         query.mimeType = "application/javascript";
         return """
             /**
-             * JavaScript библиотека для компонента cmpAction
-             * Предоставляет методы для работы с действиями на клиенте
-             * Использует новый механизм хранения данных D3Api
+             * Упрощённая JavaScript библиотека для компонента cmpAction
+             * Отправляет на сервер только имя действия и значения переменных
              */
             (function() {
-                // Предотвращаем повторную инициализацию
                 if (window.cmpActionInitialized) return;
                 window.cmpActionInitialized = true;
-            
-                /**
-                 * Расширение D3Api для работы с действиями
-                 */
-                if (typeof D3Api !== 'undefined') {
-                    
-                    /**
-                     * Установка автоматического действия
-                     * @param {string} name - Имя действия
-                     */
-                    D3Api.setActionAuto = function(name) {
-                        if (!this.GLOBAL_ACTION) this.GLOBAL_ACTION = {};
-                        this.GLOBAL_ACTION[name] = {};
-                    };
-                    
-                    /**
-                     * Выполнение действия
-                     * @param {string} nameAction - Имя действия
-                     * @param {Function} callBack - Функция обратного вызова
-                     */
-                    D3Api.executeAction = function(nameAction, callBack) {
-                        return executeAction(nameAction, callBack);
-                    };
-                    
-                    /**
-                     * Получение результата действия
-                     * @param {string} nameAction - Имя действия
-                     * @returns {Object} - Результат действия
-                     */
-                    D3Api.getActionResult = function(nameAction) {
-                        if (this.GLOBAL_ACTION && this.GLOBAL_ACTION[nameAction]) {
-                            return this.GLOBAL_ACTION[nameAction];
-                        }
-                        return null;
-                    };
-                }
-            
-                /**
-                 * Инициализация всех действий на странице
-                 */
-                function initActions() {
-                    var actionElements = document.querySelectorAll('[schema="Action"]');
-                    for (var i = 0; i < actionElements.length; i++) {
-                        var actionEl = actionElements[i];
-                        var name = actionEl.getAttribute('name');
-                        if (name && window.D3Api) {
-                            D3Api.setActionAuto(name);
-                        }
-                    }
-                }
             
                 /**
                  * Глобальная функция выполнения действия
@@ -78,84 +26,19 @@ public class cmpAction_js {
                         return;
                     }
             
-                    // Получаем атрибуты
+                    // Получаем vars из атрибута элемента
                     var varsString = ctrlObj.getAttribute('vars');
-                    // Парсим vars
                     var jsonVars = {};
             
+                    // Парсим vars
                     try {
-                        var fixedString = varsString
-                            .replace(/'/g, '"')
-                            .replace(/(\\w+):/g, '"$1":')
-                            .replace(/,\\s*}/g, '}');
-            
-                        jsonVars = JSON.parse(fixedString);
+                        jsonVars = parseVarsString(varsString);
                     } catch (e) {
-                        try {
-                            var cleanStr;
-                            var pairs = [];
-                            var depth = 0;
-                            var current = '';
-                            if (varsString) {
-                                cleanStr = varsString.trim();
-                                if (cleanStr.startsWith('{') && cleanStr.endsWith('}')) {
-                                    cleanStr = cleanStr.substring(1, cleanStr.length - 1);
-                                }
-                                for (var i = 0; i < cleanStr.length; i++) {
-                                    var c = cleanStr[i];
-                
-                                    if (c === '{') depth++;
-                                    else if (c === '}') depth--;
-                
-                                    if (c === ',' && depth === 0) {
-                                        pairs.push(current);
-                                        current = '';
-                                    } else {
-                                        current += c;
-                                    }
-                                }
-                                if (current.trim()) {
-                                    pairs.push(current);
-                                }
-                            }            
-                            for (var p = 0; p < pairs.length; p++) {
-                                var pair = pairs[p];
-                                var colonIndex = pair.indexOf(':');
-                                if (colonIndex === -1) continue;
-            
-                                var key = pair.substring(0, colonIndex).trim().replace(/['"]/g, '');
-                                var valueStr = pair.substring(colonIndex + 1).trim();
-            
-                                if (valueStr.startsWith('{') && valueStr.endsWith('}')) {
-                                    var obj = {};
-                                    var innerStr = valueStr.substring(1, valueStr.length - 1);
-                                    var innerPairs = innerStr.split(',');
-            
-                                    for (var inner = 0; inner < innerPairs.length; inner++) {
-                                        var innerPair = innerPairs[inner];
-                                        var innerColon = innerPair.indexOf(':');
-                                        if (innerColon === -1) continue;
-            
-                                        var innerKey = innerPair.substring(0, innerColon).trim().replace(/['"]/g, '');
-                                        var innerValue = innerPair.substring(innerColon + 1).trim().replace(/['"]/g, '');
-                                        obj[innerKey] = innerValue;
-                                    }
-                                    jsonVars[key] = obj;
-                                }
-                            }
-                        } catch (e2) {
-                            console.error('Manual parse failed:', e2);
-                        }
+                        console.error('Failed to parse vars attribute:', e);
+                        jsonVars = {};
                     }
             
-                    var query_type = ctrlObj.getAttribute('query_type') || 'java';
-                    var action = ctrlObj.getAttribute('action') || '';
-                    var action_name = ctrlObj.getAttribute('action_name');
-                    if (!action_name) { 
-                        action_name = ctrlObj.getAttribute('name')
-                    } 
-                    var pg_schema = ctrlObj.getAttribute('pg_schema') || 'public';
-                    // Формируем данные для отправки
+                    // Формируем данные для отправки - ТОЛЬКО ПЕРЕМЕННЫЕ
                     var requestData = {};
                     for (var key in jsonVars) {
                         var varInfo = jsonVars[key];
@@ -165,9 +48,8 @@ public class cmpAction_js {
                         var src = varInfo.src || key;
                         var srctype = varInfo.srctype || 'var';
                         var defaultVal = varInfo.defaultVal || '';
-                        var len = varInfo.len || '';
             
-                        // Используем новый механизм D3Api для получения значений
+                        // Получаем значение переменной
                         if (srctype === 'var') {
                             if (window.D3Api && D3Api.getVar) {
                                 value = D3Api.getVar(src) || defaultVal;
@@ -196,11 +78,15 @@ public class cmpAction_js {
                             'defaultVal': defaultVal
                         };
             
-                        if (len) {
-                            requestData[key].len = len;
+                        if (varInfo.len) {
+                            requestData[key]['len'] = varInfo.len;
                         }
                     }
-                    fetch('/{component}/cmpAction?query_type=' + query_type + '&action_name=' + action_name + '&pg_schema=' + pg_schema+'&action='+action, {
+            
+                    // Отправляем только имя действия и переменные
+                    var url = '/{component}/cmpAction?action_name=' + encodeURIComponent(nameAction);
+            
+                    fetch(url, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -219,43 +105,18 @@ public class cmpAction_js {
                             return;
                         }
                         
-                        // Улучшенная обработка ошибок
                         if (dataObj.ERROR) {
                             console.error('Action error:', dataObj.ERROR);
-                            
-                            // Если есть детальная информация об ошибке, показываем её
-                            if (typeof dataObj.ERROR === 'object') {
-                                var errorMsg = dataObj.ERROR.message || 'Unknown error';
-                                var errorHint = dataObj.ERROR.hint || '';
-                                var fieldValue = dataObj.ERROR.field_value || '';
-                                
-                                // Формируем сообщение для пользователя
-                                var userMessage = 'Ошибка выполнения действия: ' + errorMsg;
-                                if (errorHint) {
-                                    userMessage += '\\n' + errorHint;
-                                }
-                                if (fieldValue) {
-                                    userMessage += '\\nЗначение поля: "' + fieldValue + '"';
-                                }
-                                
-                                // Показываем сообщение пользователю
-                                if (window.D3Api && D3Api.msgbox) {
-                                    D3Api.msgbox(userMessage, 'OK');
-                                } else {
-                                    alert(userMessage);
-                                }
+                            var errorMsg = typeof dataObj.ERROR === 'object' ? 
+                                          dataObj.ERROR.message : String(dataObj.ERROR);
+                            if (window.D3Api && D3Api.msgbox) {
+                                D3Api.msgbox('Ошибка: ' + errorMsg, 'OK');
                             } else {
-                                // Простая ошибка в виде строки
-                                var errorStr = String(dataObj.ERROR);
-                                if (window.D3Api && D3Api.msgbox) {
-                                    D3Api.msgbox('Ошибка: ' + errorStr, 'OK');
-                                } else {
-                                    alert('Ошибка: ' + errorStr);
-                                }
+                                alert('Ошибка: ' + errorMsg);
                             }
                         }
             
-                        // Обрабатываем выходные переменные через новый механизм D3Api
+                        // Обрабатываем выходные переменные
                         if (dataObj.vars) {
                             var data = dataObj.vars;
                             for (var key in data) {
@@ -268,6 +129,7 @@ public class cmpAction_js {
                                     if (value === 'null') value = null;
                                     else if (value === 'true') value = true;
                                     else if (value === 'false') value = false;
+                                    
                                     if (srctype === 'var') {
                                         if (window.D3Api && D3Api.setVar) {
                                             D3Api.setVar(src, value);
@@ -299,14 +161,8 @@ public class cmpAction_js {
                         D3Api.GLOBAL_ACTION[nameAction] = dataObj;
             
                         if (callBack && typeof callBack === 'function') {
-                            // Вызываем callback даже при ошибке, но передаем информацию об ошибке
                             if (dataObj.ERROR) {
-                                // Если есть vars, передаем их вместе с ошибкой
-                                if (dataObj.vars) {
-                                    callBack({ error: dataObj.ERROR, vars: dataObj.vars });
-                                } else {
-                                    callBack({ error: dataObj.ERROR });
-                                }
+                                callBack({ error: dataObj.ERROR, vars: dataObj.vars });
                             } else {
                                 callBack(dataObj.vars || {});
                             }
@@ -314,26 +170,77 @@ public class cmpAction_js {
                     })
                     .catch(function(error) {
                         console.error('Fetch error:', error);
-                        
-                        // Показываем ошибку сети
-                        var errorMsg = 'Ошибка соединения с сервером: ' + error.message;
-                        if (window.D3Api && D3Api.msgbox) {
-                            D3Api.msgbox(errorMsg, 'OK');
-                        } else {
-                            alert(errorMsg);
-                        }
-                        
                         if (callBack && typeof callBack === 'function') {
                             callBack({ error: error });
                         }
                     });
                 };
             
-                // Инициализация после загрузки DOM
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', initActions);
-                } else {
-                    initActions();
+                /**
+                 * Парсинг строки vars
+                 */
+                function parseVarsString(str) {
+                    var result = {};
+                    if (!str || typeof str !== 'string') return result;
+                    
+                    str = str.trim();
+                    if (str.startsWith('{') && str.endsWith('}')) {
+                        str = str.substring(1, str.length - 1);
+                    }
+                    if (!str) return result;
+            
+                    var pairs = [];
+                    var depth = 0;
+                    var current = '';
+                    var inString = false;
+            
+                    for (var i = 0; i < str.length; i++) {
+                        var c = str[i];
+            
+                        if (c === '{') depth++;
+                        else if (c === '}') depth--;
+                        else if (c === "'" && (i === 0 || str[i-1] !== '\\\\')) inString = !inString;
+            
+                        if (c === ',' && depth === 0 && !inString) {
+                            pairs.push(current);
+                            current = '';
+                        } else {
+                            current += c;
+                        }
+                    }
+                    if (current.trim()) pairs.push(current);
+            
+                    for (var p = 0; p < pairs.length; p++) {
+                        var pair = pairs[p];
+                        var colonIndex = pair.indexOf(':');
+                        if (colonIndex === -1) continue;
+            
+                        var key = pair.substring(0, colonIndex).trim().replace(/^'|'$/g, '');
+                        var valueStr = pair.substring(colonIndex + 1).trim();
+            
+                        if (valueStr.startsWith('{') && valueStr.endsWith('}')) {
+                            var obj = {};
+                            var innerStr = valueStr.substring(1, valueStr.length - 1);
+                            var innerPairs = innerStr.split(',');
+            
+                            for (var inner = 0; inner < innerPairs.length; inner++) {
+                                var innerPair = innerPairs[inner];
+                                var innerColon = innerPair.indexOf(':');
+                                if (innerColon === -1) continue;
+            
+                                var innerKey = innerPair.substring(0, innerColon).trim().replace(/^'|'$/g, '');
+                                var innerValue = innerPair.substring(innerColon + 1).trim().replace(/^'|'$/g, '');
+                                obj[innerKey] = innerValue;
+                            }
+                            result[key] = obj;
+                        }
+                    }
+                    return result;
+                }
+            
+                // Расширение D3Api
+                if (typeof D3Api !== 'undefined') {
+                    D3Api.executeAction = window.executeAction;
                 }
             })();
             """.getBytes();
