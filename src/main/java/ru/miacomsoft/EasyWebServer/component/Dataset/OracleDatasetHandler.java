@@ -8,7 +8,6 @@ import org.jsoup.nodes.Element;
 import ru.miacomsoft.EasyWebServer.DatabaseConfig;
 import ru.miacomsoft.EasyWebServer.HttpExchange;
 import ru.miacomsoft.EasyWebServer.OracleQuery;
-import ru.miacomsoft.EasyWebServer.ServerConstant;
 import ru.miacomsoft.EasyWebServer.component.Base;
 import ru.miacomsoft.EasyWebServer.component.cmpDataset;
 
@@ -20,21 +19,13 @@ public class OracleDatasetHandler {
 
     public static final OracleDatasetHandler INSTANCE = new OracleDatasetHandler();
 
-    // Кэш для Oracle-датасетов (имя -> параметры) - сохраняется при инициализации страницы
     public final Map<String, HashMap<String, Object>> procedureList = new ConcurrentHashMap<>();
-
-    // Кэш для проверки существования функций в БД
-    private final Map<String, Boolean> functionExistsCache = new HashMap<>();
-    private final Map<String, String> functionContentHashCache = new ConcurrentHashMap<>();
-
-    private DatabaseConfig currentDbConfig;
-    private String currentSchema;
 
     private OracleDatasetHandler() {}
 
-    // ========== ИНИЦИАЛИЗАЦИЯ (ТОЛЬКО СОХРАНЕНИЕ В КЭШ) ==========
+    // ========== ИНИЦИАЛИЗАЦИЯ ==========
     public void handleOracleDataset(Document doc, Element element, cmpDataset.DatasetConfig config, Base base) {
-        System.out.println("Oracle dataset mode (cache only): " + config.name);
+        System.out.println("Oracle dataset mode: " + config.name);
 
         if (config.dbConfig == null) {
             System.err.println("Database config not found for: " + config.dbName);
@@ -44,21 +35,21 @@ public class OracleDatasetHandler {
             return;
         }
 
-        this.currentDbConfig = config.dbConfig;
-        this.currentSchema = config.schema;
-
         String sqlContent = element.hasText() ? element.text().trim() : "";
 
-        // Сохраняем конфигурацию в кэш - НЕ СОЗДАЁМ ФУНКЦИЮ В БД
         saveToCache(config.name, config, sqlContent);
 
         setOracleDatasetAttributes(element, config);
-        finalizeElement(element, config, base);
+        if (base != null) {
+            base.attr("query_type", config.queryType);
+            base.attr("db_type", config.dbType);
+            base.attr("pg_schema", config.schema);
+            base.attr("db", config.dbName);
+            base.attr("name", config.name);
+        }
     }
 
-    /**
-     * Сохранение конфигурации датасета в кэш без создания функции в БД
-     */
+    @SuppressWarnings("unchecked")
     private void saveToCache(String name, cmpDataset.DatasetConfig config, String sqlContent) {
         HashMap<String, Object> param = new HashMap<>();
         param.put("SQL", sqlContent);
@@ -71,16 +62,32 @@ public class OracleDatasetHandler {
         param.put("isOracle", true);
         param.put("contentHash", getShortHash(sqlContent));
 
+        // Сохраняем переменные
+        if (config.variables != null && !config.variables.isEmpty()) {
+            param.put("variables", config.variables);
+            param.put("varTypes", createVarTypeMap(config.variables));
+        }
+
         procedureList.put(name, param);
-        System.out.println("Oracle dataset cached (not created yet): " + name);
+        System.out.println("Oracle dataset cached: " + name);
     }
 
-    // ========== ВЫПОЛНЕНИЕ (ПРЯМОЕ ВЫПОЛНЕНИЕ SQL, БЕЗ СОЗДАНИЯ ФУНКЦИИ) ==========
+    private Map<String, String> createVarTypeMap(List<cmpDataset.DatasetVar> variables) {
+        Map<String, String> types = new HashMap<>();
+        if (variables != null) {
+            for (cmpDataset.DatasetVar var : variables) {
+                types.put(var.name, var.type);
+            }
+        }
+        return types;
+    }
+
+    // ========== ВЫПОЛНЕНИЕ ==========
+    @SuppressWarnings("unchecked")
     public void executeOracleQuery(HttpExchange query, JSONObject result, String datasetName,
                                    String dbName, JSONObject vars, boolean debugMode) {
         System.out.println("=== executeOracleDataset: " + datasetName + " ===");
 
-        // Получаем конфигурацию из кэша
         HashMap<String, Object> param = procedureList.get(datasetName);
         if (param == null) {
             result.put("ERROR", "Dataset not found: " + datasetName);
@@ -90,9 +97,26 @@ public class OracleDatasetHandler {
         String sqlContent = (String) param.get("SQL_RAW");
         DatabaseConfig dbConfig = (DatabaseConfig) param.get("dbConfig");
 
+        List<cmpDataset.DatasetVar> variables = (List<cmpDataset.DatasetVar>) param.get("variables");
+        Map<String, String> varTypes = (Map<String, String>) param.get("varTypes");
+
         if (dbConfig == null) {
             result.put("ERROR", "Database configuration not found");
             return;
+        }
+
+        // Преобразуем :param в ?
+        String processedSql = sqlContent;
+        List<String> paramNames = new ArrayList<>();
+
+        if (variables != null && !variables.isEmpty()) {
+            for (cmpDataset.DatasetVar var : variables) {
+                String placeholder = ":" + var.name;
+                if (processedSql.contains(placeholder)) {
+                    processedSql = processedSql.replace(placeholder, "?");
+                    paramNames.add(var.name);
+                }
+            }
         }
 
         Connection conn = null;
@@ -106,21 +130,31 @@ public class OracleDatasetHandler {
                 return;
             }
 
-            pstmt = conn.prepareStatement(sqlContent);
-            rs = pstmt.executeQuery();
+            pstmt = conn.prepareStatement(processedSql);
 
+            // Устанавливаем параметры
+            if (!paramNames.isEmpty()) {
+                int idx = 1;
+                for (String pname : paramNames) {
+                    String value = getValueFromVars(vars, query.session, pname, getVariableDefault(pname, variables));
+                    String type = getVariableType(pname, variables, varTypes);
+                    setParameter(pstmt, idx, value, type);
+                    idx++;
+                }
+            }
+
+            rs = pstmt.executeQuery();
             JSONArray dataArray = resultSetToJSONArray(rs);
             result.put("data", dataArray);
 
             if (debugMode) {
-                result.put("sql", sqlContent);
+                result.put("sql", processedSql);
                 result.put("db", dbName);
             }
 
         } catch (SQLException e) {
             result.put("ERROR", "Oracle SQL Error: " + e.getMessage());
             e.printStackTrace();
-            try { if (conn != null) conn.rollback(); } catch (SQLException ignored) {}
         } catch (Exception e) {
             result.put("ERROR", "Error: " + e.getMessage());
             e.printStackTrace();
@@ -131,146 +165,19 @@ public class OracleDatasetHandler {
         }
     }
 
-    /**
-     * Проверка существования функции в БД Oracle
-     */
-    private boolean checkFunctionExistsInDB(DatabaseConfig dbConfig, String schema, String functionName) {
-        String cacheKey = (schema != null ? schema.toUpperCase() : "DEV") + "." + functionName.toUpperCase();
+    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
 
-        if (functionExistsCache.containsKey(cacheKey)) {
-            return functionExistsCache.get(cacheKey);
-        }
-
-        Connection conn = null;
-        try {
-            conn = OracleQuery.getConnect(dbConfig);
-            if (conn == null) return false;
-
-            String sql = "SELECT COUNT(*) FROM user_objects WHERE object_type = 'FUNCTION' AND object_name = ?";
-            if (schema != null && !schema.isEmpty()) {
-                sql = "SELECT COUNT(*) FROM all_objects WHERE owner = ? AND object_type = 'FUNCTION' AND object_name = ?";
-            }
-
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                if (schema != null && !schema.isEmpty()) {
-                    ps.setString(1, schema.toUpperCase());
-                    ps.setString(2, functionName.toUpperCase());
-                } else {
-                    ps.setString(1, functionName.toUpperCase());
-                }
-                ResultSet rs = ps.executeQuery();
-                boolean exists = rs.next() && rs.getInt(1) > 0;
-                functionExistsCache.put(cacheKey, exists);
-                return exists;
-            }
-        } catch (SQLException e) {
-            System.err.println("Error checking Oracle function existence: " + e.getMessage());
-            return false;
-        } finally {
-            OracleQuery.releaseConnection(conn);
-        }
+    private void setOracleDatasetAttributes(Element element, cmpDataset.DatasetConfig config) {
+        element.attr("style", "display:none");
+        element.attr("dataset_name", config.name);
+        element.attr("name", config.name);
+        element.attr("query_type", config.queryType);
+        element.attr("db_type", config.dbType);
+        element.attr("pg_schema", config.schema);
+        element.attr("db", config.dbName);
+        element.empty();
     }
 
-    /**
-     * Проверка, нужно ли обновить функцию по хэшу
-     */
-    private boolean needsRecreationByHash(String fullName, String currentHash) {
-        if (currentHash == null) return true;
-        String cachedHash = functionContentHashCache.get(fullName);
-        return cachedHash == null || !cachedHash.equals(currentHash);
-    }
-
-    /**
-     * Обновление кэша хэша функции
-     */
-    private void updateFunctionHashCache(String name, String hash) {
-        functionContentHashCache.put(name, hash);
-    }
-
-    /**
-     * Создание функции в Oracle
-     */
-    private boolean createFunction(DatabaseConfig dbConfig, String schema, String functionName,
-                                   String sqlContent, String contentHash) {
-        Connection conn = null;
-        try {
-            conn = OracleQuery.getConnect(dbConfig);
-            if (conn == null) return false;
-
-            // Создаём функцию, возвращающую SYS_REFCURSOR
-            String fullSQL = "CREATE OR REPLACE FUNCTION " + schema + "." + functionName +
-                    " RETURN SYS_REFCURSOR AS\n" +
-                    "  l_cursor SYS_REFCURSOR;\n" +
-                    "BEGIN\n" +
-                    "  -- contentHash: " + contentHash + "\n" +
-                    "  OPEN l_cursor FOR\n" +
-                    "  " + sqlContent + ";\n" +
-                    "  RETURN l_cursor;\n" +
-                    "END " + functionName + ";\n";
-
-            try (Statement stmt = conn.createStatement()) {
-                stmt.execute(fullSQL);
-                conn.commit();
-                System.out.println("Oracle function created: " + schema + "." + functionName);
-                return true;
-            }
-        } catch (SQLException e) {
-            System.err.println("Error creating Oracle function: " + e.getMessage());
-            try { if (conn != null) conn.rollback(); } catch (SQLException ignored) {}
-            return false;
-        } finally {
-            OracleQuery.releaseConnection(conn);
-        }
-    }
-
-    /**
-     * Выполнение функции Oracle
-     */
-    private void executeFunction(HttpExchange query, JSONObject result, String fullFunctionName,
-                                 DatabaseConfig dbConfig, JSONObject vars, boolean debugMode) {
-        Connection conn = null;
-        CallableStatement cs = null;
-        ResultSet rs = null;
-
-        try {
-            conn = OracleQuery.getConnect(dbConfig);
-            if (conn == null) {
-                result.put("ERROR", "Oracle connection failed");
-                return;
-            }
-
-            // Вызываем функцию
-            String callSql = "{ ? = call " + fullFunctionName + " }";
-            cs = conn.prepareCall(callSql);
-            cs.registerOutParameter(1, OracleTypes.CURSOR);
-            cs.execute();
-
-            // Получаем результат
-            rs = (ResultSet) cs.getObject(1);
-            JSONArray dataArray = resultSetToJSONArray(rs);
-            result.put("data", dataArray);
-
-            if (debugMode) {
-                result.put("function", fullFunctionName);
-                result.put("call_sql", callSql);
-            }
-
-        } catch (SQLException e) {
-            result.put("ERROR", "Oracle SQL Error: " + e.getMessage());
-            e.printStackTrace();
-        } catch (Exception e) {
-            result.put("ERROR", "Error: " + e.getMessage());
-            e.printStackTrace();
-        } finally {
-            try { if (rs != null) rs.close(); } catch (Exception ignore) {}
-            try { if (cs != null) cs.close(); } catch (Exception ignore) {}
-            OracleQuery.releaseConnection(conn);
-        }
-    }
-
-    /**
-     * Преобразование ResultSet в JSONArray
-     */
     private JSONArray resultSetToJSONArray(ResultSet rs) throws SQLException {
         JSONArray result = new JSONArray();
         ResultSetMetaData meta = rs.getMetaData();
@@ -286,36 +193,6 @@ public class OracleDatasetHandler {
             result.put(row);
         }
         return result;
-    }
-
-    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
-
-    private void setOracleDatasetAttributes(Element element, cmpDataset.DatasetConfig config) {
-        element.attr("style", "display:none");
-        element.attr("dataset_name", config.name);
-        element.attr("name", config.name);
-        element.attr("query_type", config.queryType);
-        element.attr("db_type", config.dbType);
-        element.attr("pg_schema", config.schema);
-        element.attr("db", config.dbName);
-    }
-
-    private void finalizeElement(Element element, cmpDataset.DatasetConfig config, Base base) {
-        element.empty();
-        if (base != null) {
-            base.attr("query_type", config.queryType);
-            base.attr("db_type", config.dbType);
-            base.attr("pg_schema", config.schema);
-            base.attr("db", config.dbName);
-            base.attr("name", config.name);
-        }
-    }
-
-    private String generateFunctionName(String datasetName, String contentHash) {
-        String baseName = "ds_" + datasetName + "_" + contentHash;
-        baseName = baseName.replaceAll("[^a-zA-Z0-9_]", "_");
-        if (baseName.length() > 30) baseName = baseName.substring(0, 30);
-        return baseName.toUpperCase();
     }
 
     private String getShortHash(String input) {
@@ -335,8 +212,57 @@ public class OracleDatasetHandler {
         }
     }
 
-    // OracleTypes для SYS_REFCURSOR
-    private static class OracleTypes {
-        public static final int CURSOR = -10;
+    private String getVariableDefault(String name, List<cmpDataset.DatasetVar> variables) {
+        if (variables == null) return "";
+        for (cmpDataset.DatasetVar var : variables) {
+            if (var.name.equals(name)) return var.defaultVal != null ? var.defaultVal : "";
+        }
+        return "";
+    }
+
+    private String getVariableType(String name, List<cmpDataset.DatasetVar> variables, Map<String, String> varTypes) {
+        if (varTypes != null && varTypes.containsKey(name)) {
+            return varTypes.get(name);
+        }
+        if (variables != null) {
+            for (cmpDataset.DatasetVar var : variables) {
+                if (var.name.equals(name)) return var.type != null ? var.type : "string";
+            }
+        }
+        return "string";
+    }
+
+    private void setParameter(PreparedStatement pstmt, int idx, String value, String type) throws SQLException {
+        if (value == null || value.isEmpty()) {
+            pstmt.setNull(idx, Types.VARCHAR);
+            return;
+        }
+        switch (type.toLowerCase()) {
+            case "int": case "integer":
+                pstmt.setInt(idx, Integer.parseInt(value));
+                break;
+            case "long": case "bigint":
+                pstmt.setLong(idx, Long.parseLong(value));
+                break;
+            case "double": case "float":
+                pstmt.setDouble(idx, Double.parseDouble(value));
+                break;
+            default:
+                pstmt.setString(idx, value);
+        }
+    }
+
+    private String getValueFromVars(JSONObject vars, Map<String, Object> session, String name, String defaultValue) {
+        if (!vars.has(name)) return defaultValue;
+        Object val = vars.get(name);
+        if (val instanceof JSONObject) {
+            JSONObject obj = (JSONObject) val;
+            if ("session".equals(obj.optString("srctype"))) {
+                Object sessionVal = session.get(name);
+                return sessionVal != null ? sessionVal.toString() : obj.optString("defaultVal", defaultValue);
+            }
+            return obj.optString("value", obj.optString("defaultVal", defaultValue));
+        }
+        return val.toString();
     }
 }

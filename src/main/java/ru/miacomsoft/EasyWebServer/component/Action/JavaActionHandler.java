@@ -12,13 +12,8 @@ import java.util.*;
 public class JavaActionHandler {
 
     public static final JavaActionHandler INSTANCE = new JavaActionHandler();
-
-    // Кэш для проверки, скомпилирован ли уже класс
     private final Map<String, Boolean> compiledCache = new HashMap<>();
-
     private JavaActionHandler() {}
-
-    // ========== ВЫПОЛНЕНИЕ ==========
     public void executeJavaAction(HttpExchange query, JSONObject result, cmpAction.ActionCache cache,
                                   JSONObject vars, Map<String, Object> session) {
         System.out.println("=== executeJavaAction: " + cache.name + " ===");

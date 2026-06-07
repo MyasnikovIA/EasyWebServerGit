@@ -15,9 +15,7 @@ import ru.miacomsoft.EasyWebServer.component.Dataset.PostgreDatasetHandler;
 import ru.miacomsoft.EasyWebServer.component.Function.OracleFunctionHandler;
 import ru.miacomsoft.EasyWebServer.component.Function.PostgreFunctionHandler;
 
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 
 @SuppressWarnings("unchecked")
 public class cmpDataset extends Base {
@@ -100,7 +98,7 @@ public class cmpDataset extends Base {
             String connectionDbName = resolveDbName(params.dbName, (String) param.get("dbName"));
 
             if (isOracle) {
-                OracleDatasetHandler.INSTANCE.executeOracleQuery(query, result, params.datasetName, connectionDbName, vars, params.debugMode);
+                OracleDatasetHandler.INSTANCE.executeOracleQuery(query, result, params.datasetName,params.dbName, vars, params.debugMode);
             } else {
                 String fullName = params.datasetName;
                 if (params.pgSchema!=null && params.pgSchema.length()>0) {
@@ -147,9 +145,33 @@ public class cmpDataset extends Base {
                 config.schema = config.dbConfig.getSchema() != null ? config.dbConfig.getSchema() : "public";
             }
         }
+        config.variables = parseVariables(element);
         return config;
     }
 
+    private List<DatasetVar> parseVariables(Element element) {
+        List<DatasetVar> vars = new ArrayList<>();
+        if (element == null) return vars;
+
+        for (Element child : element.children()) {
+            String tag = child.tag().toString().toLowerCase();
+            if (tag.contains("var") || tag.contains("cmpdatasetvar")) {
+                DatasetVar var = new DatasetVar();
+                Attributes attrs = child.attributes();
+                var.name = attrs.get("name");
+                var.src = RemoveArrKeyRtrn(attrs, "src", var.name);
+                var.srctype = RemoveArrKeyRtrn(attrs, "srctype", "var");
+                var.type = RemoveArrKeyRtrn(attrs, "type", "string");
+                var.defaultVal = RemoveArrKeyRtrn(attrs, "default", "");
+                var.len = RemoveArrKeyRtrn(attrs, "len", "");
+                String put = attrs.hasKey("put") ? attrs.get("put") : null;
+                String get = attrs.hasKey("get") ? attrs.get("get") : null;
+                var.direction = (put != null && get != null) ? "INOUT" : (put != null ? "OUT" : "IN");
+                vars.add(var);
+            }
+        }
+        return vars;
+    }
     private DatabaseConfig getDatabaseConfiguration(DatasetConfig config) {
         if (config.dbName.equals("default") || config.dbName.equals("db")) {
             DatabaseConfig dbConfig = ServerConstant.config.DATABASES.get("default");
@@ -279,11 +301,21 @@ public class cmpDataset extends Base {
         return requestDbName;
     }
 
-    // ======================== ВНУТРЕННИЕ КЛАССЫ DTO ========================
     public static class DatasetConfig {
         public String name, dbName, queryType, schema, dbType, docPath, rootPath;
         public boolean isOracle;
         public DatabaseConfig dbConfig;
+        public List<DatasetVar> variables;
+    }
+
+    public static class DatasetVar {
+        public String name;
+        public String src;
+        public String srctype;
+        public String len;
+        public String defaultVal;
+        public String type;
+        public String direction;
     }
 
     public static class RequestParams {

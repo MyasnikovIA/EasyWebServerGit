@@ -8,7 +8,6 @@ import org.jsoup.nodes.Element;
 import ru.miacomsoft.EasyWebServer.DatabaseConfig;
 import ru.miacomsoft.EasyWebServer.HttpExchange;
 import ru.miacomsoft.EasyWebServer.OracleQuery;
-import ru.miacomsoft.EasyWebServer.ServerConstant;
 import ru.miacomsoft.EasyWebServer.component.Base;
 import ru.miacomsoft.EasyWebServer.component.cmpAction;
 
@@ -21,13 +20,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class OracleActionHandler {
 
     public static final OracleActionHandler INSTANCE = new OracleActionHandler();
-
-    // Кэш для действий Oracle (имя -> параметры)
     public final Map<String, HashMap<String, Object>> procedureList = new ConcurrentHashMap<>();
-
     private OracleActionHandler() {}
-
-    // ========== ИНИЦИАЛИЗАЦИЯ (ТОЛЬКО СОХРАНЕНИЕ В КЭШ) ==========
     public void handleOracleAction(Document doc, Element element, cmpAction.ActionConfig config, Base base) {
         System.out.println("=== handleOracleAction (cache only) for: " + config.name);
 
@@ -41,10 +35,7 @@ public class OracleActionHandler {
 
         String sqlContent = element.hasText() ? element.text().trim() : "";
         List<OracleVar> variables = parseVariables(element);
-
-        // Сохраняем конфигурацию в кэш
         saveToCache(config.name, config, variables, sqlContent);
-
         setComponentAttributes(element, config, variables);
         finalizeElement(element, config, base);
     }
@@ -256,9 +247,6 @@ public class OracleActionHandler {
         }
         return result;
     }
-
-    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
-
     private List<OracleVar> parseVariables(Element element) {
         List<OracleVar> vars = new ArrayList<>();
         for (Element child : element.children()) {
@@ -343,9 +331,6 @@ public class OracleActionHandler {
         json.append("}");
         return json.toString();
     }
-
-    // ========== ПАРСИНГ SQL С ИМЕНОВАННЫМИ ПАРАМЕТРАМИ ==========
-
     private ParsedSql parseNamedParameters(String sql) {
         if (sql == null || sql.isEmpty()) {
             return new ParsedSql(sql, Collections.emptyList());
@@ -507,9 +492,6 @@ public class OracleActionHandler {
         }
         return defaultValue;
     }
-
-    // ========== ВНУТРЕННИЕ КЛАССЫ ==========
-
     private static class OracleVar {
         String name, src, srctype, len, defaultVal, type, direction;
     }

@@ -26,7 +26,7 @@ public class Main {
 
         web.config("LOGIN_PAGE" , "login.html");
         web.config("PAGE_404" , "page_404.html");
-        web.config("INDEX_PAGE" , "index.html");
+        web.config("INDEX_PAGE" , "/index.html");
         web.config("DEBUG" , "false");
         web.config("CAHEBLE" , "true");
 
@@ -53,6 +53,8 @@ public class Main {
             web.config("WEBAPP_DIR" , "/var/www/EasyWebServerGit_www");
             web.config("DEFAULT_PORT" , "80");
         }
+
+        // index.html
 
         web.config("DEFAULT_HOST" , "0.0.0.0");
         web.config("APP_NAME" , "webpage");

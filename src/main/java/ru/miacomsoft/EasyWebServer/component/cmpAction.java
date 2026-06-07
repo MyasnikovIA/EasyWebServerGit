@@ -395,7 +395,6 @@ public class cmpAction extends Base {
                 vars, query.session, debugMode);
     }
 
-    // ======================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ========================
 
     private static JSONObject parseVarsFromBody(HttpExchange query) {
         JSONObject vars = new JSONObject();
