@@ -5,6 +5,7 @@ import ru.miacomsoft.EasyWebServer.util.callbackType.CallbackProcedure;
 import ru.miacomsoft.EasyWebServer.util.structObject.JavaInnerClassObject;
 import ru.miacomsoft.EasyWebServer.util.structObject.JavaTerminalClassObject;
 
+import javax.net.ssl.SSLServerSocketFactory;
 import java.io.File;
 import java.io.FileWriter;
 import java.net.ServerSocket;
@@ -23,30 +24,17 @@ public class WebServer implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(WebServer.class.getName());
     private static boolean isRunServer = false;
     private static WebServer server;
-    private HttpsServerWrapper httpsServer;
+    private static WebRTCSignalingServer webrtcServer;
 
-    /**
-     *
-     */
     public WebServer() {
     }
 
-    /**
-     * @param mainClass
-     */
     public WebServer(Class<?> mainClass) {
         System.out.println("Список классов страниц: " + getWebPage(mainClass));
     }
 
-    /**
-     *
-     */
     public static void start() {
         server = new WebServer();
-
-        // Запуск HTTPS если настроен
-        server.initHttps();
-
         Thread thread = new Thread(server);
         thread.start();
         Runtime.getRuntime().addShutdownHook(new ShutDown());
@@ -57,59 +45,33 @@ public class WebServer implements Runnable {
         }
     }
 
-    /**
-     *
-     */
     public static void stop() {
         isRunServer = false;
+        if (webrtcServer != null) {
+            webrtcServer.stop();
+        }
     }
 
-
-    /**
-     * @param path
-     * @param contentText
-     */
     public void onPage(String path, StringBuffer contentText) {
         ServerResource.pagesListContent.put(path, contentText);
     }
 
-    /**
-     * @param path
-     * @param contentText
-     * @param mime
-     */
     public void onPage(String path, StringBuffer contentText, String mime) {
         ServerResource.pagesListContent.put(path, contentText);
     }
 
-    /**
-     * @param callbackProcedure
-     */
     public void onPage(CallbackProcedure callbackProcedure) {
         this.callbackProcedure = callbackProcedure;
     }
 
-    /**
-     * прописывание контента в Java коде
-     *
-     * @param path         - путь к вызываемому содержимому
-     * @param callbackPage - JAVA код страницы
-     */
     public void onPage(String path, CallbackPage callbackPage) {
         ServerResource.pagesList.put(path, callbackPage);
     }
 
-    /**
-     * @param path
-     * @param file
-     */
     public void onPage(String path, File file) {
         ServerResource.pagesListFile.put(path, file);
     }
 
-    /**
-     * @param args
-     */
     public void initConfig(String args) {
         if (args.length() == 0) {
             ServerConstant.config = new ServerConstant("config.ini");
@@ -118,43 +80,22 @@ public class WebServer implements Runnable {
         }
     }
 
-    /**
-     * @param confPropName
-     * @param confPropValue
-     * @return
-     */
-    /**
-     * @param confPropName
-     * @param confPropValue
-     * @return
-     */
     public Boolean config(String confPropName, String confPropValue) {
-        // Проверяем, является ли значение списком (содержит точку с запятой)
         if (confPropValue.contains(";")) {
             return handleListProperty(confPropName, confPropValue);
         }
-
-        // Специальная обработка для DATABASES
         if (confPropName.startsWith("DATABASES.")) {
             return handleDatabaseProperty(confPropName, confPropValue);
         }
-
         return ServerConstant.config.setProp(confPropName, confPropValue);
     }
-    /**
-     * Обрабатывает свойства для множественных БД
-     */
+
     private Boolean handleDatabaseProperty(String confPropName, String confPropValue) {
         try {
-            // Формат: DATABASES.dbname
             String[] parts = confPropName.split("\\.", 2);
-            if (parts.length != 2) {
-                return false;
-            }
-
+            if (parts.length != 2) return false;
             String dbName = parts[1];
             DatabaseConfig dbConfig = DatabaseConfig.parse(confPropValue);
-
             if (dbConfig != null) {
                 ServerConstant.config.DATABASES.put(dbName, dbConfig);
                 System.out.println("Added database config: " + dbName + " -> " + dbConfig.getType());
@@ -163,70 +104,47 @@ public class WebServer implements Runnable {
         } catch (Exception e) {
             System.err.println("Error handling database property '" + confPropName + "': " + e.getMessage());
         }
-
         return false;
     }
 
-    /**
-     * Обрабатывает свойства, которые являются списками (массивами)
-     * @param confPropName имя свойства
-     * @param confPropValue значение свойства с разделителями
-     * @return true если успешно обработано
-     */
     private Boolean handleListProperty(String confPropName, String confPropValue) {
         try {
-            // Если свойство явно не поддерживается как список, сохраняем как строку
             if (!isListProperty(confPropName)) {
                 return ServerConstant.config.setProp(confPropName, confPropValue);
             }
-
             String[] values = confPropValue.split(";");
             List<String> valueList = new ArrayList<>();
-
             for (String value : values) {
                 String trimmed = value.trim();
-                if (!trimmed.isEmpty()) {
-                    valueList.add(trimmed);
-                }
+                if (!trimmed.isEmpty()) valueList.add(trimmed);
             }
-
-            // Определяем, является ли свойство известным списком
             switch (confPropName) {
                 case "WEBAPP_DIR":
-                    // Для WEBAPP_DIR используем специальную обработку
                     ServerConstant.config.WEBAPP_DIRS.clear();
                     for (String dir : valueList) {
-                        // Корректируем путь, если он относительный
                         String fullPath = dir;
                         if (!dir.contains("/") && !dir.contains("\\")) {
                             fullPath = ServerConstant.config.SERVER_HOM + File.separator + dir;
                         }
                         ServerConstant.config.WEBAPP_DIRS.add(fullPath);
                     }
-                    // Для обратной совместимости сохраняем первый каталог в WEBAPP_DIR
                     if (!ServerConstant.config.WEBAPP_DIRS.isEmpty()) {
                         ServerConstant.config.WEBAPP_DIR = ServerConstant.config.WEBAPP_DIRS.get(0);
                     }
                     return true;
-
                 case "LIB_CSS":
                     ServerConstant.config.LIB_CSS.clear();
                     ServerConstant.config.LIB_CSS.addAll(valueList);
                     return true;
-
                 case "LIB_JS":
                     ServerConstant.config.LIB_JS.clear();
                     ServerConstant.config.LIB_JS.addAll(valueList);
                     return true;
-
                 case "LIB_JAR":
                     ServerConstant.config.LIB_JAR.clear();
                     ServerConstant.config.LIB_JAR.addAll(valueList);
                     return true;
-
                 default:
-                    // Для других свойств сохраняем как обычную строку
-                    // (клиент сам решит, как обрабатывать точку с запятой)
                     return ServerConstant.config.setProp(confPropName, confPropValue);
             }
         } catch (Exception e) {
@@ -234,9 +152,7 @@ public class WebServer implements Runnable {
             return false;
         }
     }
-    /**
-     * Проверяет, является ли свойство списком
-     */
+
     private boolean isListProperty(String propertyName) {
         return propertyName.endsWith("_LIST") ||
                 propertyName.endsWith("_DIRS") ||
@@ -246,20 +162,11 @@ public class WebServer implements Runnable {
                 propertyName.equals("LIB_JAR") ||
                 propertyName.equals("MIME_MAP");
     }
-    /**
-     * @param confPropName
-     * @param confPropValue
-     * @return
-     */
+
     public Boolean config(String confPropName, Boolean confPropValue) {
         return ServerConstant.config.setProp(confPropName, confPropValue);
     }
 
-    /**
-     * Подключить к серверу сторонние Jar файлы ВЭБ страниц
-     *
-     * @param pathJarFile
-     */
     public void addPageJar(String pathJarFile) {
         System.out.println("Список страниц из Jar файла " + getPageJar(pathJarFile));
     }
@@ -270,11 +177,40 @@ public class WebServer implements Runnable {
         try {
             isRunServer = true;
             viewWebResource(port);
-            ServerSocket ss = new ServerSocket(port);
+
+            ServerSocket ss;
+
+            // ============================================================
+            // ТОЛЬКО ОДНА HTTPS-СХЕМА — как в FileServer:
+            // PEM (cert + key) + основной DEFAULT_PORT.
+            // Никаких вторых серверов на 443. Порт 443 не нужен.
+            // ============================================================
+            if (ServerConstant.config.HTTPS_ENABLED
+                    && !ServerConstant.config.HTTPS_CERT.isEmpty()
+                    && !ServerConstant.config.HTTPS_KEY.isEmpty()) {
+                System.out.println("[WebServer] Starting in HTTPS mode (PEM via SSLManager)...");
+                System.out.println("[WebServer] Cert: " + ServerConstant.config.HTTPS_CERT);
+                System.out.println("[WebServer] Key:  " + ServerConstant.config.HTTPS_KEY);
+                System.out.println("[WebServer] Listen port: " + port);
+                SSLServerSocketFactory ssf = SSLManager.createSSLServerSocketFactory(
+                        ServerConstant.config.HTTPS_CERT,
+                        ServerConstant.config.HTTPS_KEY
+                );
+                ss = ssf.createServerSocket(port);
+            } else {
+                System.out.println("[WebServer] Starting in HTTP mode...");
+                System.out.println("[WebServer] Listen port: " + port);
+                ss = new ServerSocket(port);
+            }
+
+            // === ЗАПУСК WEBRTC SIGNALING (видеоконференции) ===
+            if (ServerConstant.config.VIDEOCHAT_PORT > 0) {
+                webrtcServer = new WebRTCSignalingServer(ServerConstant.config.VIDEOCHAT_PORT);
+                webrtcServer.start();
+            }
+
             while (isRunServer == true) {
-                // ждем новое подключение Socket клиента
                 Socket socket = ss.accept();
-                // Запускаем обработку нового соединение в паралельном потоке и ждем следующее соединение
                 new Thread(new ServerResourceHandler(socket)).start();
             }
         } catch (Exception ex) {
@@ -284,11 +220,6 @@ public class WebServer implements Runnable {
         }
     }
 
-    /**
-     * Показать в консоли список доступных ресурсов через браузер
-     *
-     * @param port
-     */
     private void viewWebResource(int port) {
         System.out.print("port: ");
         System.out.println(port);
@@ -329,12 +260,8 @@ public class WebServer implements Runnable {
                 System.out.println("-----------------------");
             }
         }
-
     }
 
-    /**
-     * @param stringMessage
-     */
     protected synchronized static void WriteToFile(String stringMessage) {
         if (ServerConstant.config.LOG_FILE.length() == 0) {
             System.err.println(stringMessage);
@@ -348,96 +275,33 @@ public class WebServer implements Runnable {
             }
         }
     }
-    /**
-     * Определяет тип операционной системы
-     * Возвращает: "windows", "linux", "mac", "solaris", "bsd", "aix", или "unknown"
-     */
+
     public static String getOS() {
         String osName = System.getProperty("os.name").toLowerCase();
-
-        if (osName.contains("win")) {
-            return "windows";
-        } else if (osName.contains("nix") || osName.contains("nux") || osName.contains("aix")) {
-            return "linux";
-        } else if (osName.contains("mac")) {
-            return "mac";
-        } else if (osName.contains("sunos") || osName.contains("solaris")) {
-            return "solaris";
-        } else if (osName.contains("bsd")) {
-            return "bsd";
-        } else {
-            return "unknown";
-        }
+        if (osName.contains("win")) return "windows";
+        else if (osName.contains("nix") || osName.contains("nux") || osName.contains("aix")) return "linux";
+        else if (osName.contains("mac")) return "mac";
+        else if (osName.contains("sunos") || osName.contains("solaris")) return "solaris";
+        else if (osName.contains("bsd")) return "bsd";
+        else return "unknown";
     }
 
-    /**
-     * Проверяет, является ли ОС Windows
-     */
-    public static boolean isWindows() {
-        return getOS().equals("windows");
-    }
-
-    /**
-     * Проверяет, является ли ОС Linux
-     */
-    public static boolean isLinux() {
-        return getOS().equals("linux");
-    }
-
-    /**
-     * Проверяет, является ли ОС Unix-подобной (Linux, Mac, BSD, Solaris)
-     */
+    public static boolean isWindows() { return getOS().equals("windows"); }
+    public static boolean isLinux() { return getOS().equals("linux"); }
     public static boolean isUnixLike() {
         String os = getOS();
         return os.equals("linux") || os.equals("mac") ||
                 os.equals("solaris") || os.equals("bsd") ||
                 os.equals("aix");
     }
-    /**
-     * Инициализация HTTPS сервера (НОВЫЙ МЕТОД)
-     */
-    private void initHttps() {
-        // Проверяем, нужно ли запускать HTTPS
-        if (ServerConstant.config.HTTPS_PORT <= 0) {
-            System.out.println("HTTPS отключён (порт <= 0)");
-            return;
-        }
 
-        try {
-            // Если указан путь к keystore - используем его
-            if (ServerConstant.config.KEYSTORE_PATH != null && !ServerConstant.config.KEYSTORE_PATH.isEmpty()) {
-                String keyPass = ServerConstant.config.KEY_PASSWORD;
-                if (keyPass == null || keyPass.isEmpty()) {
-                    keyPass = ServerConstant.config.KEYSTORE_PASSWORD;
-                }
-
-                httpsServer = new HttpsServerWrapper(
-                        ServerConstant.config.HTTPS_PORT,
-                        ServerConstant.config.KEYSTORE_PATH,
-                        ServerConstant.config.KEYSTORE_PASSWORD,
-                        keyPass
-                );
-            } else {
-                // Иначе используем самоподписанный сертификат (только для разработки)
-                System.out.println("⚠️ Ключевое хранилище не указано, используется самоподписанный сертификат");
-                httpsServer = new HttpsServerWrapper(ServerConstant.config.HTTPS_PORT);
-            }
-
-            httpsServer.start();
-
-        } catch (Exception e) {
-            System.err.println("Ошибка инициализации HTTPS: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    // В методе shutDown() добавить остановку HTTPS:
+    // В shutDown() больше НЕ останавливаем httpsServer (его больше нет)
     static void shutDown() {
         try {
             LOGGER.info("Shutting down server...");
 
-            if (server != null && server.httpsServer != null) {
-                server.httpsServer.stop();
+            if (webrtcServer != null) {
+                webrtcServer.stop();
             }
 
             OracleQuery.shutdownPools();
@@ -451,5 +315,3 @@ public class WebServer implements Runnable {
         }
     }
 }
-
-
