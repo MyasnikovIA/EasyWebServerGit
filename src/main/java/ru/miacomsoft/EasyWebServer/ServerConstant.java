@@ -15,26 +15,39 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public final class ServerConstant {
+    // Конфигурация по умолчанию
     public static ServerConstant config = new ServerConstant("");
 
+    // Поля конфигурации
     public String DATABASE_NAME = "jdbc:postgresql://your_host:your_port/your_database";
     public String DATABASE_USER_NAME = "postgres";
     public String DATABASE_USER_PASS = "******";
 
-    public int ORACLE_POOL_SIZE = 10;
-    public int POSTGRES_MIN_POOL_SIZE = 2;
-    public int POSTGRES_MAX_POOL_SIZE = 20;
+    public int ORACLE_POOL_SIZE = 10;      // максимальное количество соединений Oracle
+    public int POSTGRES_MIN_POOL_SIZE = 2; // минимальное количество соединений PostgreSQL
+    public int POSTGRES_MAX_POOL_SIZE = 20; // максимальное количество соединений PostgreSQL
 
-    // === HTTPS (PEM, как в FileServer): основная схема ===
-    // Если HTTPS_ENABLED = true и заданы HTTPS_CERT / HTTPS_KEY —
-    // основной DEFAULT_PORT работает как HTTPS. Порт 443 не используется.
+    // === HTTPS ===
+    // Поддерживаются два способа (как в FileServer_git):
+    //   A) "keystore" + "password" (PKCS12/JKS) — приоритетный
+    //   B) "cert" + "key" (PEM fullchain + PKCS#8 private key)
+    // Если задан HTTPS_KEYSTORE — используется он, PEM игнорируется.
     public boolean HTTPS_ENABLED = false;
-    public String HTTPS_CERT = "";   // путь к fullchain.pem / .crt
-    public String HTTPS_KEY = "";    // путь к privkey.pem / .key (PKCS#8)
+    public String HTTPS_KEYSTORE = "";             // путь к .p12/.jks
+    public String HTTPS_KEYSTORE_PASSWORD = "";    // пароль keystore
+    public String HTTPS_KEY_PASSWORD = "";         // пароль ключа (если отличается)
+    public String HTTPS_CERT = "";                 // путь к fullchain.crt/.pem (fallback)
+    public String HTTPS_KEY = "";                  // путь к privkey.key (PKCS#8)
+
+    // === HTTP → HTTPS redirect ===
+    // 0 = выключено. Если > 0 — на этом порту поднимается plain HTTP-сервер,
+    // который отвечает 301 на https://<host>:<DEFAULT_PORT>/<path>.
+    public int HTTP_REDIRECT_PORT = 0;
 
     // === WebRTC signaling ===
     public int VIDEOCHAT_PORT = 0;   // 0 = выключено
 
+    // Новая структура для хранения множественных БД
     public Map<String, DatabaseConfig> DATABASES = new HashMap<>();
 
     public String LIB_DIR = "D:\\JavaProject\\HttpServer-JAVA\\lib";
@@ -55,7 +68,7 @@ public final class ServerConstant {
 
     public String DEFAULT_HOST = "0.0.0.0";
     public String DEFAULT_PORT = "9092";
-    public int LENGTH_CAHE = 10_485_760;
+    public int LENGTH_CAHE = 10_485_760; // 10MB
 
     public String SERVER_HOM = "/data/data/com.termux/files/home2";
     public String APPLICATION_OCTET_STREAM = "application/octet-stream";
@@ -70,7 +83,7 @@ public final class ServerConstant {
     public String ENCODING_UTF8 = "UTF-8";
     public String GIT_URL = "";
     public String GIT_MASTER = "";
-    public int GIT_INTERVAL = 120;
+    public int GIT_INTERVAL = 120; // в минутах
     public String LOG_FILE = "";
     public final int MAX_HEADER_SIZE = 4728;
 
@@ -79,6 +92,7 @@ public final class ServerConstant {
     public final List<String> LIB_JAR = new ArrayList<>();
     public final Map<String, String> MIME_MAP = new HashMap<>();
 
+    // Статический инициализатор для MIME типов
     static {
         Map<String, String> defaultMimeTypes = Map.ofEntries(
                 Map.entry("appcache", "text/cache-manifest"),
@@ -113,6 +127,7 @@ public final class ServerConstant {
                 Map.entry("php", "text/plain"),
                 Map.entry("ts", "video/mp2t")
         );
+
         config.MIME_MAP.putAll(defaultMimeTypes);
     }
 
@@ -120,6 +135,7 @@ public final class ServerConstant {
         if (pathIniConfig == null || pathIniConfig.isEmpty()) {
             return;
         }
+
         System.out.println("pathIniConfig: " + pathIniConfig);
         File configFile = new File(pathIniConfig);
         if (configFile.exists()) {
@@ -139,6 +155,7 @@ public final class ServerConstant {
         try (BufferedReader reader = new BufferedReader(new FileReader(configFile))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                // Удаляем комментарии
                 int commentIndex = line.indexOf('#');
                 if (commentIndex != -1) {
                     line = line.substring(0, commentIndex);
@@ -152,10 +169,12 @@ public final class ServerConstant {
     }
 
     private void parseConfig(JSONObject jsonConfig) {
+        // Настройки базы данных
         setIfPresent(jsonConfig, "DATABASE_NAME", val -> DATABASE_NAME = val);
         setIfPresent(jsonConfig, "DATABASE_USER_NAME", val -> DATABASE_USER_NAME = val);
         setIfPresent(jsonConfig, "DATABASE_USER_PASS", val -> DATABASE_USER_PASS = val);
 
+        // Парсим множественные БД
         if (jsonConfig.has("DATABASES")) {
             JSONObject dbs = jsonConfig.getJSONObject("DATABASES");
             dbs.keys().forEachRemaining(key -> {
@@ -170,16 +189,19 @@ public final class ServerConstant {
 
         setIfPresent(jsonConfig, "APP_NAME", val -> APP_NAME = val);
 
+        // Булевы настройки
         setBooleanIfPresent(jsonConfig, "DEBUG", val -> DEBUG = val);
         setBooleanIfPresent(jsonConfig, "GZIPPABLE", val -> GZIPPABLE = val);
         setBooleanIfPresent(jsonConfig, "CAHEBLE", val -> CAHEBLE = val);
 
+        // Строковые настройки
         setIfPresent(jsonConfig, "LOGIN_PAGE", val -> LOGIN_PAGE = val);
         setIfPresent(jsonConfig, "PAGE_404", val -> PAGE_404 = val);
         setIfPresent(jsonConfig, "FORWARD_SINGLE_SLASH", val -> FORWARD_SINGLE_SLASH = val);
         setIfPresent(jsonConfig, "FORWARD_DOUBLE_SLASH", val -> FORWARD_DOUBLE_SLASH = val);
         setIfPresent(jsonConfig, "COMPONENT_PATH", val -> COMPONENT_PATH = val);
         setIfPresent(jsonConfig, "WEBAPP_DIR", val -> {
+            // Обработка нескольких каталогов
             if (val.contains(";")) {
                 String[] dirs = val.split(";");
                 WEBAPP_DIRS.clear();
@@ -187,11 +209,13 @@ public final class ServerConstant {
                     String trimmedDir = dir.trim();
                     if (!trimmedDir.isEmpty()) {
                         if (!trimmedDir.contains("/") && !trimmedDir.contains("\\")) {
+                            // Относительный путь - добавляем SERVER_HOM
                             trimmedDir = SERVER_HOM + File.separator + trimmedDir;
                         }
                         WEBAPP_DIRS.add(trimmedDir);
                     }
                 }
+                // Для обратной совместимости сохраняем первый каталог в WEBAPP_DIR
                 if (!WEBAPP_DIRS.isEmpty()) {
                     WEBAPP_DIR = WEBAPP_DIRS.get(0);
                 }
@@ -224,13 +248,16 @@ public final class ServerConstant {
         setIfPresent(jsonConfig, "GIT_MASTER", val -> GIT_MASTER = val);
         setIfPresent(jsonConfig, "LOG_FILE", val -> LOG_FILE = val);
 
+        // Числовые настройки
         setIntIfPresent(jsonConfig, "LENGTH_CAHE", val -> LENGTH_CAHE = val);
         setIntIfPresent(jsonConfig, "GIT_INTERVAL", val -> GIT_INTERVAL = val);
 
+        // Списки
         setListIfPresent(jsonConfig, "LIB_CSS", LIB_CSS);
         setListIfPresent(jsonConfig, "LIB_JS", LIB_JS);
         setListIfPresent(jsonConfig, "LIB_JAR", LIB_JAR);
 
+        // MIME типы
         if (jsonConfig.has("MIME_MAP")) {
             JSONObject mimeMap = jsonConfig.getJSONObject("MIME_MAP");
             mimeMap.keys().forEachRemaining(key ->
@@ -238,10 +265,12 @@ public final class ServerConstant {
             );
         }
 
+        // Корректировка путей
         if (!WEBAPP_DIR.contains("/")) {
             WEBAPP_DIR = SERVER_HOM + '/' + WEBAPP_DIR;
         }
 
+        // Настройка Git
         if (!GIT_URL.isEmpty()) {
             setupGitSync();
         }
@@ -250,18 +279,27 @@ public final class ServerConstant {
         setIntIfPresent(jsonConfig, "POSTGRES_MIN_POOL_SIZE", val -> POSTGRES_MIN_POOL_SIZE = val);
         setIntIfPresent(jsonConfig, "POSTGRES_MAX_POOL_SIZE", val -> POSTGRES_MAX_POOL_SIZE = val);
 
-        // === HTTPS (PEM) ===
-        // Основной формат — вложенный блок "https": {...}, как в FileServer
+        // === HTTPS: вложенный блок "https" (как в FileServer_git) ===
         if (jsonConfig.has("https")) {
-            JSONObject httpsBlock = jsonConfig.getJSONObject("https");
-            HTTPS_ENABLED = httpsBlock.optBoolean("enabled", false);
-            HTTPS_CERT = httpsBlock.optString("cert", "");
-            HTTPS_KEY = httpsBlock.optString("key", "");
+            JSONObject h = jsonConfig.getJSONObject("https");
+            HTTPS_ENABLED = h.optBoolean("enabled", false);
+            HTTPS_KEYSTORE = h.optString("keystore", "");
+            HTTPS_KEYSTORE_PASSWORD = h.optString("password", "");
+            HTTPS_CERT = h.optString("cert", "");
+            HTTPS_KEY = h.optString("key", "");
+            HTTPS_KEY_PASSWORD = h.optString("keyPassword", "");
         }
-        // Опционально: плоские ключи в корне (для web.config(...))
+
+        // Плоские ключи (для web.config(...) из кода)
         setBooleanIfPresent(jsonConfig, "HTTPS_ENABLED", val -> HTTPS_ENABLED = val);
         setIfPresent(jsonConfig, "HTTPS_CERT", val -> HTTPS_CERT = val);
         setIfPresent(jsonConfig, "HTTPS_KEY", val -> HTTPS_KEY = val);
+        setIfPresent(jsonConfig, "HTTPS_KEYSTORE", val -> HTTPS_KEYSTORE = val);
+        setIfPresent(jsonConfig, "HTTPS_KEYSTORE_PASSWORD", val -> HTTPS_KEYSTORE_PASSWORD = val);
+        setIfPresent(jsonConfig, "HTTPS_KEY_PASSWORD", val -> HTTPS_KEY_PASSWORD = val);
+
+        // === HTTP → HTTPS redirect ===
+        setIntIfPresent(jsonConfig, "HTTP_REDIRECT_PORT", val -> HTTP_REDIRECT_PORT = val);
 
         // === WebRTC signaling ===
         setIntIfPresent(jsonConfig, "VIDEOCHAT_PORT", val -> VIDEOCHAT_PORT = val);
@@ -301,7 +339,10 @@ public final class ServerConstant {
     }
 
     private void setupGitSync() {
+        // Первоначальный clone/pull
         gitSync();
+
+        // Запуск периодической синхронизации
         Thread gitSyncThread = new Thread(() -> {
             while (true) {
                 try {
@@ -313,6 +354,7 @@ public final class ServerConstant {
                 }
             }
         }, "GitSyncThread");
+
         gitSyncThread.setDaemon(true);
         gitSyncThread.start();
     }
@@ -330,19 +372,28 @@ public final class ServerConstant {
         System.out.println();
     }
 
+    // Вспомогательные функциональные интерфейсы
     @FunctionalInterface
-    private interface StringConsumer { void accept(String value); }
+    private interface StringConsumer {
+        void accept(String value);
+    }
 
     @FunctionalInterface
-    private interface BooleanConsumer { void accept(boolean value); }
+    private interface BooleanConsumer {
+        void accept(boolean value);
+    }
 
     @FunctionalInterface
-    private interface IntConsumer { void accept(int value); }
+    private interface IntConsumer {
+        void accept(int value);
+    }
 
+    // Методы для динамического изменения свойств
     public static boolean setProp(String propertyName, String propertyValue) {
         try {
             Field field = config.getClass().getDeclaredField(propertyName);
             field.setAccessible(true);
+
             Class<?> type = field.getType();
             if (type == String.class) {
                 field.set(config, propertyValue);
@@ -364,6 +415,7 @@ public final class ServerConstant {
         try {
             Field field = config.getClass().getDeclaredField(propertyName);
             field.setAccessible(true);
+
             if (field.getType() == boolean.class || field.getType() == Boolean.class) {
                 field.setBoolean(config, propertyValue);
                 return true;
@@ -375,35 +427,64 @@ public final class ServerConstant {
         }
     }
 
-    public void addPathCss(String path) { LIB_CSS.add(path); }
-    public void addPathJs(String path) { LIB_JS.add(path); }
-    public void addPathJar(String path) { LIB_JAR.add(path); }
-    public void addMime(String fileExtension, String mimeType) { MIME_MAP.put(fileExtension, mimeType); }
+    // Методы для добавления путей
+    public void addPathCss(String path) {
+        LIB_CSS.add(path);
+    }
 
+    public void addPathJs(String path) {
+        LIB_JS.add(path);
+    }
+
+    public void addPathJar(String path) {
+        LIB_JAR.add(path);
+    }
+
+    public void addMime(String fileExtension, String mimeType) {
+        MIME_MAP.put(fileExtension, mimeType);
+    }
+
+    /**
+     * Получить конфигурацию БД по имени.
+     * Если имя не указано или равно "default", возвращает БД по умолчанию.
+     */
     public DatabaseConfig getDatabaseConfig(String dbName) {
         if (dbName == null || dbName.isEmpty() || "default".equals(dbName)) {
+            // Возвращаем только явно объявленную "default", а не первую попавшуюся
             return DATABASES.get("default");
         }
         return DATABASES.get(dbName);
     }
 
+    /**
+     * Парсит JDBC URL для получения хоста, порта, базы данных
+     */
     private DatabaseConfig.ConnectionInfo parseJdbcUrl(String url) {
         DatabaseConfig.ConnectionInfo info = new DatabaseConfig.ConnectionInfo();
-        if (url == null || url.isEmpty()) return info;
+        if (url == null || url.isEmpty()) {
+            return info;
+        }
+
         try {
+            // Пример: jdbc:postgresql://localhost:5432/Panorama360
             if (url.contains("://")) {
                 String withoutProtocol = url.substring(url.indexOf("://") + 3);
                 String[] hostPortDb = withoutProtocol.split("/", 2);
                 if (hostPortDb.length > 0) {
                     String[] hostPort = hostPortDb[0].split(":");
                     info.host = hostPort[0];
-                    if (hostPort.length > 1) info.port = hostPort[1];
+                    if (hostPort.length > 1) {
+                        info.port = hostPort[1];
+                    }
                 }
-                if (hostPortDb.length > 1) info.database = hostPortDb[1];
+                if (hostPortDb.length > 1) {
+                    info.database = hostPortDb[1];
+                }
             }
         } catch (Exception e) {
             System.err.println("Error parsing JDBC URL: " + e.getMessage());
         }
+
         return info;
     }
 }

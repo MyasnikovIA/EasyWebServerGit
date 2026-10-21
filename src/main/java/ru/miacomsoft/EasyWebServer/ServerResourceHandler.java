@@ -91,18 +91,73 @@ public class ServerResourceHandler implements Runnable {
     @Override
     public void run() {
         try {
+            // Явно завершаем TLS handshake для SSLSocket. Иначе первый read()
+            // внутри readRequestHeader() запустит handshake неявно, а ошибки
+            // (plain HTTP на TLS-порт, несовместимый клиент) прилетят в общий
+            // catch как SEVERE с null-сообщением.
+            if (!performTlsHandshake()) {
+                return;
+            }
             if (readRequestHeader()) {
                 sendResponseQuery();
             }
+        } catch (javax.net.ssl.SSLException sslEx) {
+            // Plain HTTP пришёл на TLS-порт (http://host:port вместо https://host:port,
+            // либо сканер/healthcheck). Это клиентская ошибка, не SEVERE.
+            String remote = (query != null && query.socket != null)
+                    ? String.valueOf(query.socket.getRemoteSocketAddress()) : "?";
+            Logger.getLogger(ServerResourceHandler.class.getName()).log(
+                    Level.INFO,
+                    "TLS handshake failed from " + remote + ": " + sslEx.getClass().getSimpleName()
+                            + " (" + sslEx.getMessage() + "). "
+                            + "Используйте https://<host>:<port>/ — сервер слушает TLS на этом порту.");
         } catch (Exception ex) {
-            Logger.getLogger(ServerResourceHandler.class.getName()).log(Level.SEVERE, null, ex);
+            Logger.getLogger(ServerResourceHandler.class.getName()).log(
+                    Level.SEVERE, "Request handling error", ex);
         } finally {
             try {
-                query.close();
-                query = null;
+                if (query != null) {
+                    query.close();
+                    query = null;
+                }
             } catch (Exception ex) {
-                Logger.getLogger(ServerResourceHandler.class.getName()).log(Level.SEVERE, null, ex);
+                Logger.getLogger(ServerResourceHandler.class.getName()).log(
+                        Level.WARNING, "Socket close error", ex);
             }
+        }
+    }
+
+    /**
+     * Явно завершает TLS handshake, если socket — SSLSocket.
+     * Возвращает true, если сокет не TLS либо handshake прошёл успешно.
+     * Возвращает false, если handshake провалился (тогда лог уже написан).
+     */
+    private boolean performTlsHandshake() {
+        Socket raw = (query != null) ? query.socket : null;
+        if (!(raw instanceof javax.net.ssl.SSLSocket)) {
+            return true; // обычный HTTP
+        }
+        javax.net.ssl.SSLSocket ssl = (javax.net.ssl.SSLSocket) raw;
+        try {
+            ssl.startHandshake();
+            javax.net.ssl.SSLSession sess = ssl.getSession();
+            System.out.println("[TLS] Handshake OK from " + ssl.getRemoteSocketAddress()
+                    + " protocol=" + sess.getProtocol()
+                    + " cipher=" + sess.getCipherSuite());
+            return true;
+        } catch (javax.net.ssl.SSLException sslEx) {
+            String remote = String.valueOf(ssl.getRemoteSocketAddress());
+            Logger.getLogger(ServerResourceHandler.class.getName()).log(
+                    Level.INFO,
+                    "TLS handshake failed from " + remote + ": " + sslEx.getClass().getSimpleName()
+                            + " (" + sslEx.getMessage() + "). "
+                            + "Скорее всего, клиент пришёл по http:// вместо https://.");
+            return false;
+        } catch (java.io.IOException ioEx) {
+            Logger.getLogger(ServerResourceHandler.class.getName()).log(
+                    Level.INFO,
+                    "TLS handshake I/O error: " + ioEx.getMessage());
+            return false;
         }
     }
 
@@ -145,6 +200,7 @@ public class ServerResourceHandler implements Runnable {
         }
         return -1;
     }
+
     private boolean readRequestHeader() throws IOException {
         int charInt;
         StringBuffer sb = new StringBuffer();
@@ -259,21 +315,42 @@ public class ServerResourceHandler implements Runnable {
         for (String titleLine : sb.toString().split("\r")) {
             titleLine = titleLine.replace("\n", "");
             indLine++;
+
+            // Пустая строка после разделителя — пропускаем (иначе будет
+            // StringIndexOutOfBoundsException на substring(0, -1) при пустом
+            // preconnect-запросе от Chrome после TLS-handshake).
+            if (titleLine.isEmpty()) {
+                continue;
+            }
+
             if (indLine == 1) {
-                int lenTitle = titleLine.length();
-                titleLine.substring(0, titleLine.indexOf(" "));
-                query.typeQuery = titleLine.substring(0, titleLine.indexOf(" "));
-                titleLine = titleLine.substring(titleLine.indexOf(query.typeQuery) + query.typeQuery.length() + 2);
-                if (titleLine.contains(" HTTP/")) {
-                    int httpIndex = titleLine.lastIndexOf(" HTTP/");
-                    if (httpIndex > 0) {
-                        titleLine = titleLine.substring(0, httpIndex);
-                    }
+                // Первая строка: "METHOD /path HTTP/1.1"
+                int spaceIdx = titleLine.indexOf(' ');
+                if (spaceIdx <= 0) {
+                    // Невалидная request line — считаем как запрос к главной
+                    query.typeQuery = "GET";
+                    query.requestPath = ServerConstant.config.INDEX_PAGE;
+                    query.requestText = "/" + ServerConstant.config.INDEX_PAGE;
+                    break;
                 }
-                if (titleLine == null || titleLine.trim().isEmpty() || titleLine.equals("/")) {
-                    titleLine = ServerConstant.config.INDEX_PAGE;
+
+                query.typeQuery = titleLine.substring(0, spaceIdx);
+
+                // Остаток после "METHOD " — без ведущего пробела
+                String rest = titleLine.substring(spaceIdx + 1).trim();
+
+                // Отрезаем " HTTP/x.y" в конце, если есть
+                int httpIdx = rest.lastIndexOf(" HTTP/");
+                if (httpIdx > 0) {
+                    rest = rest.substring(0, httpIdx);
                 }
-                titleLine = URLDecoder.decode(titleLine, StandardCharsets.UTF_8.toString());
+
+                // Пусто или "/" — отдаём INDEX_PAGE
+                if (rest.isEmpty() || rest.equals("/")) {
+                    rest = ServerConstant.config.INDEX_PAGE;
+                }
+
+                titleLine = URLDecoder.decode(rest, StandardCharsets.UTF_8.toString());
                 query.requestText = titleLine;
                 query.requestPath = titleLine;
 
@@ -286,7 +363,9 @@ public class ServerResourceHandler implements Runnable {
                         if (param.isEmpty()) continue;
                         String[] keyValue = param.split("=", 2);
                         String key = URLDecoder.decode(keyValue[0], StandardCharsets.UTF_8.name());
-                        String value = keyValue.length > 1 ? URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8.name()) : "";
+                        String value = keyValue.length > 1
+                                ? URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8.name())
+                                : "";
                         try {
                             query.requestParam.put(key, value);
                             JSONObject obj = new JSONObject();
@@ -330,181 +409,6 @@ public class ServerResourceHandler implements Runnable {
     }
 
     /**
-     * Полностью переписанная реализация чтения HTTP-запроса.
-     * Поддерживает:
-     * - GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS / TRACE / CONNECT / TERM
-     * - Чтение заголовков, GET-параметров, Cookie
-     * - Чтение тела запроса (URL-encoded или JSON)
-     *
-     * @return true, если запрос успешно прочитан, false — если это не HTTP-запрос
-     * @throws IOException при ошибках ввода-вывода
-     */
-    private boolean readRequestHeaderOld() throws IOException {
-        // Сюда будем читать весь заголовок
-        StringBuilder headerBuilder = new StringBuilder();
-        char[] buffer = new char[1024];
-        int bytesRead;
-
-        while ((bytesRead = query.inputStreamReader.read(buffer)) > 0) {
-            headerBuilder.append(buffer, 0, bytesRead);
-
-            // Если найдены два CRLF подряд, значит заголовок закончился
-            if (headerBuilder.indexOf("\r\n\r\n") != -1 || headerBuilder.indexOf("\n\n") != -1) {
-                break;
-            }
-
-            // Ограничиваем размер буфера, чтобы избежать DoS
-            if (headerBuilder.length() > ServerConstant.config.MAX_HEADER_SIZE) {
-                throw new IOException("HTTP Header too large");
-            }
-        }
-
-        String rawHeader = headerBuilder.toString();
-
-        // Проверяем, что это действительно HTTP-запрос
-        if (!rawHeader.matches("(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT|TERM)\\s+.*")) {
-            return false;
-        }
-
-        // Разбиваем заголовок по строкам
-        String[] lines = rawHeader.split("\\r\\n|\\n");
-
-        // Первая строка: метод, путь, версия
-        String[] requestLine = lines[0].split(" ");
-        if (requestLine.length < 2) {
-            throw new IOException("Invalid HTTP request line");
-        }
-
-        // Сохраняем тип запроса
-        query.typeQuery = requestLine[0].toUpperCase(); // GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS / TRACE / CONNECT / TERM
-
-        // URI и протокол
-        String uri = requestLine[1];                    // URI
-        String protocol = requestLine.length > 2 ? requestLine[2] : "HTTP/1.1"; // протокол
-
-        // Декодируем URI
-        try {
-            uri = URLDecoder.decode(uri, StandardCharsets.UTF_8.name());
-        } catch (UnsupportedEncodingException e) {
-            throw new IOException("UTF-8 not supported", e);
-        }
-
-        // Сохраняем URI
-        query.requestText = uri;
-        query.requestPath = uri;
-
-        // Разбираем параметры из URI
-        if (uri.contains("?")) {
-            String[] parts = uri.split("\\?", 2);
-            query.requestPath = parts[0];
-
-            for (String param : parts[1].split("&")) {
-                if (param.isEmpty()) continue;
-                String[] keyValue = param.split("=", 2);
-                String key = URLDecoder.decode(keyValue[0], StandardCharsets.UTF_8.name());
-                String value = keyValue.length > 1 ?
-                        URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8.name()) : "";
-                try {
-                    query.requestParam.put(key, value);
-                    JSONObject obj = new JSONObject();
-                    obj.put(key, value);
-                    query.requestParamArray.put(obj);
-                } catch (JSONException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-
-        // Парсим остальные заголовки
-        for (int i = 1; i < lines.length; i++) {
-            String line = lines[i];
-            if (line.isEmpty()) continue;
-
-            int colonIndex = line.indexOf(':');
-            if (colonIndex == -1) continue;
-
-            String headerName = line.substring(0, colonIndex).trim();
-            String headerValue = line.substring(colonIndex + 1).trim();
-
-            query.headers.put(headerName, headerValue);
-
-            // Обработка Cookie
-            if ("Cookie".equalsIgnoreCase(headerName)) {
-                for (String cookiePair : headerValue.split(";")) {
-                    String[] pair = cookiePair.trim().split("=", 2);
-                    if (pair.length == 2) {
-                        query.cookie.put(pair[0], pair[1]);
-                        if ("session".equalsIgnoreCase(pair[0])) {
-                            query.sessionID = pair[1];
-                        }
-                    }
-                }
-            }
-        }
-
-        // Устанавливаем MIME-тип ответа
-        query.mimeType = getFileMime(query.requestPath);
-
-        // Обработка тела запроса (только для POST, PUT, PATCH)
-        if (Arrays.asList("POST", "PUT", "PATCH").contains(query.typeQuery) && query.headers.containsKey("Content-Length")) {
-            try {
-                long contentLength = Long.parseLong((String) query.headers.get("Content-Length"));
-                if (contentLength > 0) {
-                    ByteArrayOutputStream bodyStream = new ByteArrayOutputStream();
-                    byte[] bodyBuffer = new byte[4096];
-                    int totalRead = 0;
-
-                    while (totalRead < contentLength && (bytesRead = query.socket.getInputStream().read(bodyBuffer)) > 0) {
-                        bodyStream.write(bodyBuffer, 0, bytesRead);
-                        totalRead += bytesRead;
-                    }
-
-                    String body = bodyStream.toString(StandardCharsets.UTF_8.name());
-
-                    // Сохраняем как raw строка и как байты
-                    query.postCharBody = body.toCharArray();
-                    query.postByte = body.getBytes(StandardCharsets.UTF_8);
-
-                    // Если тело — JSON, можно попытаться распарсить
-                    if ("application/json".equalsIgnoreCase((String) query.headers.get("Content-Type"))) {
-                        try {
-                            query.messageJson = new JSONObject(body);
-                        } catch (JSONException ignored) {
-                        }
-                    } else {
-                        // Для application/x-www-form-urlencoded
-                        for (String param : body.split("&")) {
-                            if (param.isEmpty()) continue;
-                            String[] keyValue = param.split("=", 2);
-                            String key = URLDecoder.decode(keyValue[0], StandardCharsets.UTF_8.name());
-                            String value = keyValue.length > 1 ?
-                                    URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8.name()) : "";
-                            try {
-                                query.requestParam.put(key, value);
-                                JSONObject obj = new JSONObject();
-                                obj.put(key, value);
-                                query.requestParamArray.put(obj);
-                            } catch (JSONException e) {
-                                e.printStackTrace();
-                            }
-                        }
-                    }
-                }
-            } catch (NumberFormatException e) {
-                throw new IOException("Invalid Content-Length");
-            }
-        }
-        // Получаем или создаём сессию
-        query.session = getSession(query);
-        if (query.typeQuery.toUpperCase().equals("TERM")) { // Обработка запроса с терминала
-            sendResponseTerminal();
-            return false;
-        }
-        return true;
-    }
-
-
-    /**
      * Обрабатывает запрос от терминала.
      */
     private void sendResponseTerminal() {
@@ -513,9 +417,6 @@ public class ServerResourceHandler implements Runnable {
         }
     }
 
-    /**
-     * Отправляет HTTP-ответ клиенту (браузеру).
-     */
     /**
      * Процедура отправки ответа клиенту (браузеру)
      */
@@ -551,8 +452,6 @@ public class ServerResourceHandler implements Runnable {
         // Обработка основного запроса
         processMainRequest();
     }
-
-// Вспомогательные методы
 
     private void setMimeType() {
         query.mimeType = getFileMime(query.requestPath);
@@ -592,7 +491,6 @@ public class ServerResourceHandler implements Runnable {
         if (file != null) {
             resourcePath = file.getAbsolutePath();
         }
-        // System.out.println("query.requestPath: "+query.requestPath);
         // 3. Обработка найденного файла
         if (file != null && file.exists()) {
             processFileResource(file, resourcePath);
@@ -603,14 +501,12 @@ public class ServerResourceHandler implements Runnable {
 
     private String buildResourcePath() {
         if (query == null || query.requestPath == null) {
-            // Если указано несколько каталогов, используем первый
             if (!ServerConstant.config.WEBAPP_DIRS.isEmpty()) {
                 return Paths.get(ServerConstant.config.WEBAPP_DIRS.get(0)).toString();
             }
             return Paths.get(ServerConstant.config.WEBAPP_DIR).toString();
         }
 
-        // Проверяем кэшированные файлы
         if (ServerResource.pagesListFile != null) {
             File cachedFile = ServerResource.pagesListFile.get(query.requestPath);
             if (cachedFile != null) {
@@ -618,13 +514,11 @@ public class ServerResourceHandler implements Runnable {
             }
         }
 
-        // Ищем файл во всех доступных каталогах
         File file = findFileInAllDirectories(query.requestPath);
         if (file != null) {
             return file.getAbsolutePath();
         }
 
-        // Если ничего не найдено, возвращаем путь из основного каталога
         Path webappPath = Paths.get(ServerConstant.config.WEBAPP_DIR);
         return webappPath.resolve(query.requestPath).normalize().toString();
     }
@@ -651,7 +545,6 @@ public class ServerResourceHandler implements Runnable {
         byte[] res = ServerResource.pagesList.get(query.requestPath).call(query);
         if (res != null) {
             if ("html".equals(query.mimeType) || query.mimeType != null && query.mimeType.contains("html")) {
-                // Определяем правильный корневой каталог для файла
                 String rootPath = getWebappDirForFile(new File(resourcePath));
                 res = readResourceContent(new String(res, StandardCharsets.UTF_8), resourcePath,
                         rootPath, "");
@@ -668,18 +561,14 @@ public class ServerResourceHandler implements Runnable {
             return;
         }
 
-        // ДЛЯ БИНАРНЫХ ФАЙЛОВ ИСПОЛЬЗУЕМ sendByteFile
         if (file.length() > ServerConstant.config.LENGTH_CAHE || isBinaryFile(ext)) {
-            // Используем sendByteFile для бинарных файлов
             query.sendByteFile(file);
             return;
         }
 
-        // Только для текстовых файлов используем кэширование
         String lastModified = String.valueOf(file.lastModified());
         Resource res;
 
-        // Проверяем режим отладки из сессии
         boolean debugMode = false;
         if (query.session != null && query.session.containsKey("debug_mode")) {
             debugMode = (boolean) query.session.get("debug_mode");
@@ -693,12 +582,9 @@ public class ServerResourceHandler implements Runnable {
 
         query.mimeType = res.mimeType;
 
-        // Отправляем в зависимости от типа контента
         if (res.isBinary) {
-            // Для бинарных файлов используем sendByteFile
             query.sendByteFile(file);
         } else {
-            // Для текстовых файлов используем sendHtml
             query.sendHtml(new String(res.content, StandardCharsets.UTF_8));
         }
     }
@@ -719,7 +605,6 @@ public class ServerResourceHandler implements Runnable {
         String page404Path = ServerConstant.config.PAGE_404;
 
         if (page404Path.isEmpty()) {
-            // Показываем детали поиска для отладки
             StringBuilder errorMsg = new StringBuilder();
             errorMsg.append("<h1>404 - Page not found</h1>");
             errorMsg.append("<p><strong>Requested path:</strong> ").append(query.requestPath).append("</p>");
@@ -735,7 +620,6 @@ public class ServerResourceHandler implements Runnable {
 
             query.sendHtml(errorMsg.toString());
         } else {
-            // Ищем 404 страницу во всех доступных каталогах
             File found404 = findFileInAllDirectories(page404Path);
 
             if (found404 != null) {
@@ -768,15 +652,6 @@ public class ServerResourceHandler implements Runnable {
         WriteToFile(logMessage);
     }
 
-    /**
-     * Парсит содержимое HTML-файла и заменяет специальные теги.
-     *
-     * @param fileContent  исходный HTML
-     * @param resourcePath путь к файлу
-     * @param rootPath     корневая директория сайта
-     * @param fragmentName имя фрагмента (опционально)
-     * @return байты обработанного контента
-     */
     private byte[] readResourceContent(String fileContent, String resourcePath, String rootPath, String fragmentName) {
         ByteArrayOutputStream bout = new ByteArrayOutputStream();
         try {
@@ -806,16 +681,6 @@ public class ServerResourceHandler implements Runnable {
         return bout.toByteArray();
     }
 
-    /**
-     * Читает ресурс (файл) и возвращает его в виде байтов.
-     *
-     * @param file         файл
-     * @param query        объект запроса
-     * @param resourcePath путь к файлу
-     * @param rootPath     корневая директория
-     * @param fragmentName имя фрагмента (опционально)
-     * @return байты файла
-     */
     private Resource readResource(File file, HttpExchange query, String resourcePath, String rootPath, String fragmentName) {
         ByteArrayOutputStream bout = new ByteArrayOutputStream();
         String ext = getFileExt(resourcePath).toLowerCase();
@@ -824,7 +689,6 @@ public class ServerResourceHandler implements Runnable {
 
         try {
             if ("html".equals(ext) && !isBinary) {
-                // Только HTML файлы парсим
                 Path path = Paths.get(resourcePath);
                 byte[] bytes = Files.readAllBytes(path);
                 Document doc = Jsoup.parse(new String(bytes, StandardCharsets.UTF_8));
@@ -832,7 +696,6 @@ public class ServerResourceHandler implements Runnable {
                 doc.attr("doc_path", resourcePath);
                 doc.attr("rootPath", rootPath);
 
-                // Передаем режим отладки в компоненты через атрибут документа
                 boolean debugMode = query.isDebugMode();
                 doc.attr("debug_mode", String.valueOf(debugMode));
 
@@ -844,7 +707,6 @@ public class ServerResourceHandler implements Runnable {
                 Element elsDst = doc.getElementsByTag("html").get(0);
                 bout.write(elsDst.toString().getBytes(StandardCharsets.UTF_8));
             } else {
-                // Для всех других файлов просто читаем как есть
                 InputStream in = new FileInputStream(resourcePath);
                 byte[] bs = new byte[4096];
                 int lenReadByts;
@@ -860,22 +722,10 @@ public class ServerResourceHandler implements Runnable {
         return new Resource(bout.toByteArray(), mimeType, isBinary);
     }
 
-    /**
-     * Возвращает сессию по ID.
-     *
-     * @param sessionKey ID сессии
-     * @return объект сессии
-     */
     public static HashMap<String, Object> getSession(String sessionKey) {
         return sessionList.get(sessionKey);
     }
 
-    /**
-     * Получает или создаёт новую сессию.
-     *
-     * @param httpExchange текущий запрос
-     * @return объект сессии
-     */
     public static HashMap<String, Object> getSession(HttpExchange httpExchange) {
         HashMap<String, Object> userSession;
         if (httpExchange.sessionID.isEmpty()) {
@@ -892,31 +742,16 @@ public class ServerResourceHandler implements Runnable {
         return userSession;
     }
 
-    /**
-     * Возвращает MIME-тип по расширению файла.
-     *
-     * @param path путь к файлу
-     * @return MIME-тип
-     */
     public static String getFileMime(String path) {
         String ext = getFileExt(path).toLowerCase();
         return ServerConstant.config.MIME_MAP.getOrDefault(ext, ServerConstant.config.APPLICATION_OCTET_STREAM);
     }
 
-    /**
-     * Возвращает расширение файла.
-     *
-     * @param path путь к файлу
-     * @return расширение
-     */
     public static String getFileExt(String path) {
         int dotIndex = path.lastIndexOf('.');
         return (dotIndex >= 0) ? path.substring(dotIndex + 1) : "";
     }
 
-    /**
-     * Структура для хранения статического контента.
-     */
     private static class Resource {
         public final byte[] content;
         public String mimeType;
@@ -946,13 +781,6 @@ public class ServerResourceHandler implements Runnable {
         return Class.forName(className);
     }
 
-    /**
-     * Парсит XML-структуру и заменяет специальные теги.
-     *
-     * @param doc           документ
-     * @param element       элемент
-     * @param elementParent родительский элемент
-     */
     public static void parseElementV2(Document doc, Element element, Element elementParent) {
         String tagName = element.tag().getName();
         if (!tagName.equals("cmpform") && tagName.length() > 3) {
@@ -969,7 +797,6 @@ public class ServerResourceHandler implements Runnable {
                     Constructor constructor = classComponent.getConstructor(Document.class, Element.class, String.class);
                     Object newClassObject = constructor.newInstance(doc, element, tagName);
 
-                    // заменить старый тэг новым (сгенерированным)
                     element.replaceWith((Element) newClassObject);
                 } catch (ClassNotFoundException e) {
                     Element errBody = new Element("error");
@@ -984,17 +811,14 @@ public class ServerResourceHandler implements Runnable {
             }
         }
         for (Attribute attr : element.attributes().asList()) {
-            //  System.out.println("\t\t" + attr.getKey() + " = " + attr.getValue());
         }
         if (element.hasText()) {
-            //  System.out.println(element.tagName() + " element.text().trim() " + element.text().trim());
         }
         if (element.childNodeSize() == 0) {
 
         } else {
             int childrenint = 0;
             for (int numChildNode = 0; numChildNode < element.childNodeSize(); numChildNode++) {
-                // System.out.println(numChildNode + ")  " + element.childNode(numChildNode).nodeName() + " element.childrenSize() " + element.childrenSize() + " numChildNode " + numChildNode);
                 if (element.childNode(numChildNode).nodeName().equals("#text")) {
 
                 } else if (element.childNode(numChildNode).nodeName().equals("#comment")) {
@@ -1014,26 +838,16 @@ public class ServerResourceHandler implements Runnable {
         }
     }
 
-
-    /**
-     * Перегруженный метод для упрощения вызова.
-     */
     public static void parseElementV2(Document doc, Element element) {
         parseElementV2(doc, element, null);
     }
 
-    /**
-     * Парсит строку как элемент.
-     */
     public static Element parseElementV2(Document doc, String elementText) {
         Element el = new Element(elementText);
         parseElementV2(doc, el, null);
         return el;
     }
 
-    /**
-     * Парсит подформу из внешнего файла.
-     */
     public static String parseSubElementV2(Document doc, String path, String SelectorQuery) {
         try (InputStreamReader reader = new InputStreamReader(
                 new FileInputStream(doc.attr("rootPath") + path), StandardCharsets.UTF_8)) {
@@ -1048,9 +862,6 @@ public class ServerResourceHandler implements Runnable {
         }
     }
 
-    /**
-     * Парсит строку как HTML и применяет правила замены.
-     */
     public static String parseStrElementV2(Document doc, String htmlText, String SelectorQuery) {
         Document docForm = Jsoup.parse(htmlText);
         if (SelectorQuery.isEmpty()) {
@@ -1067,12 +878,8 @@ public class ServerResourceHandler implements Runnable {
         }
     }
 
-    /**
-     * Определяет, является ли файл бинарным (не текстовым)
-     */
     private static boolean isBinaryFile(String extension) {
         extension = extension.toLowerCase();
-        // Явно указываем текстовые типы
         String[] textExtensions = {
                 "html", "htm", "css", "js", "json", "xml",
                 "txt", "csv", "md", "java", "php", "asp",
@@ -1086,30 +893,20 @@ public class ServerResourceHandler implements Runnable {
                 return false;
             }
         }
-        // Все остальное считаем бинарным
         return true;
     }
 
-    /**
-     * Ищет файл по заданному пути во всех доступных каталогах
-     *
-     * @param requestPath путь к файлу
-     * @return найденный файл или null
-     */
     private File findFileInAllDirectories(String requestPath) {
         String requestPathLocal = requestPath.replace("/", File.separator);
-        // 1. Поиск в основных каталогах
         if (!ServerConstant.config.WEBAPP_DIRS.isEmpty()) {
             for (String webappDir : ServerConstant.config.WEBAPP_DIRS) {
                 String resourcePath = webappDir + File.separator + requestPathLocal;
-                // System.out.println("findFileInAllDirectories: "+resourcePath);
                 File file = new File(resourcePath);
                 if (file.exists() && file.isFile()) {
                     return file;
                 }
             }
         } else {
-            // Старая логика для обратной совместимости
             String resourcePath = ServerConstant.config.WEBAPP_DIR + File.separator + requestPathLocal;
             File file = new File(resourcePath);
             if (file.exists() && file.isFile()) {
@@ -1117,7 +914,6 @@ public class ServerResourceHandler implements Runnable {
             }
         }
 
-        // 2. Поиск в системном каталоге
         if (!ServerConstant.config.WEBAPP_SYSTEM_DIR.isEmpty()) {
             String systemPath = ServerConstant.config.WEBAPP_SYSTEM_DIR + File.separator + requestPathLocal;
             File systemFile = new File(systemPath);
@@ -1129,19 +925,11 @@ public class ServerResourceHandler implements Runnable {
         return null;
     }
 
-    /**
-     * Ищет файл во всех доступных каталогах
-     *
-     * @param fileName имя файла
-     * @return найденный файл или null
-     */
     public static File findResourceFile(String fileName) {
-        // Проверяем кэшированные файлы
         if (ServerResource.pagesListFile != null && ServerResource.pagesListFile.containsKey(fileName)) {
             return ServerResource.pagesListFile.get(fileName);
         }
 
-        // Ищем в основных каталогах
         if (!ServerConstant.config.WEBAPP_DIRS.isEmpty()) {
             for (String webappDir : ServerConstant.config.WEBAPP_DIRS) {
                 File file = new File(webappDir + File.separator + fileName);
@@ -1156,7 +944,6 @@ public class ServerResourceHandler implements Runnable {
             }
         }
 
-        // Ищем в системном каталоге
         if (!ServerConstant.config.WEBAPP_SYSTEM_DIR.isEmpty()) {
             File systemFile = new File(ServerConstant.config.WEBAPP_SYSTEM_DIR + File.separator + fileName);
             if (systemFile.exists() && systemFile.isFile()) {
@@ -1168,13 +955,11 @@ public class ServerResourceHandler implements Runnable {
     }
 
     private String buildResourcePathForPageList() {
-        // Для pagesList используем поиск по всем каталогам, как и для обычных файлов
         File file = findFileInAllDirectories(query.requestPath);
         if (file != null) {
             return file.getAbsolutePath();
         }
 
-        // Если файл не найден, возвращаем путь из первого каталога
         if (!ServerConstant.config.WEBAPP_DIRS.isEmpty()) {
             return ServerConstant.config.WEBAPP_DIRS.get(0) + File.separator +
                     query.requestPath.replaceAll("/", File.separator);
@@ -1184,9 +969,6 @@ public class ServerResourceHandler implements Runnable {
         }
     }
 
-    /**
-     * Определяет, из какого каталога взят файл
-     */
     private String getWebappDirForFile(File file) {
         if (file == null) {
             return ServerConstant.config.WEBAPP_DIR;
@@ -1194,7 +976,6 @@ public class ServerResourceHandler implements Runnable {
 
         String filePath = file.getAbsolutePath();
 
-        // Проверяем WEBAPP_DIRS
         if (!ServerConstant.config.WEBAPP_DIRS.isEmpty()) {
             for (String webappDir : ServerConstant.config.WEBAPP_DIRS) {
                 if (filePath.startsWith(webappDir)) {
@@ -1203,13 +984,11 @@ public class ServerResourceHandler implements Runnable {
             }
         }
 
-        // Проверяем WEBAPP_SYSTEM_DIR
         if (!ServerConstant.config.WEBAPP_SYSTEM_DIR.isEmpty() &&
                 filePath.startsWith(ServerConstant.config.WEBAPP_SYSTEM_DIR)) {
             return ServerConstant.config.WEBAPP_SYSTEM_DIR;
         }
 
-        // По умолчанию возвращаем WEBAPP_DIR
         return ServerConstant.config.WEBAPP_DIR;
     }
 }
