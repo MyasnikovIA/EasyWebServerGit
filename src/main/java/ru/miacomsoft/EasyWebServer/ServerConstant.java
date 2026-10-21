@@ -44,8 +44,13 @@ public final class ServerConstant {
     // который отвечает 301 на https://<host>:<DEFAULT_PORT>/<path>.
     public int HTTP_REDIRECT_PORT = 0;
 
-    // === WebRTC signaling ===
+    // === WebRTC signaling (legacy WebSocket, plain/без TLS — на отдельном порту) ===
     public int VIDEOCHAT_PORT = 0;   // 0 = выключено
+
+    // === STUN (UDP) для ICE в RTCPeerConnection ===
+    // 0 = выключено. Пример: 19302.
+    // Используется браузером в `new RTCPeerConnection({ iceServers: [{ urls: 'stun:host:port' }] })`.
+    public int STUN_PORT = 0;
 
     // Новая структура для хранения множественных БД
     public Map<String, DatabaseConfig> DATABASES = new HashMap<>();
@@ -303,6 +308,9 @@ public final class ServerConstant {
 
         // === WebRTC signaling ===
         setIntIfPresent(jsonConfig, "VIDEOCHAT_PORT", val -> VIDEOCHAT_PORT = val);
+
+        // === STUN (UDP) для RTCPeerConnection ===
+        setIntIfPresent(jsonConfig, "STUN_PORT", val -> STUN_PORT = val);
     }
 
     private void setIfPresent(JSONObject json, String key, StringConsumer setter) {
@@ -450,7 +458,6 @@ public final class ServerConstant {
      */
     public DatabaseConfig getDatabaseConfig(String dbName) {
         if (dbName == null || dbName.isEmpty() || "default".equals(dbName)) {
-            // Возвращаем только явно объявленную "default", а не первую попавшуюся
             return DATABASES.get("default");
         }
         return DATABASES.get(dbName);
@@ -466,7 +473,6 @@ public final class ServerConstant {
         }
 
         try {
-            // Пример: jdbc:postgresql://localhost:5432/Panorama360
             if (url.contains("://")) {
                 String withoutProtocol = url.substring(url.indexOf("://") + 3);
                 String[] hostPortDb = withoutProtocol.split("/", 2);

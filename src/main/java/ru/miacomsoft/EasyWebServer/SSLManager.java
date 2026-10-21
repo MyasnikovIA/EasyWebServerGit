@@ -40,17 +40,8 @@ public class SSLManager {
             String keystorePath, String keystorePassword, String keyPassword,
             String certPath, String keyPath) throws Exception {
 
-        SSLServerSocketFactory factory;
-
-        if (keystorePath != null && !keystorePath.isEmpty()) {
-            factory = createFactoryFromKeystore(keystorePath, keystorePassword, keyPassword);
-        } else if (certPath != null && !certPath.isEmpty()
-                && keyPath != null && !keyPath.isEmpty()) {
-            factory = createFactoryFromPem(certPath, keyPath);
-        } else {
-            throw new IllegalArgumentException(
-                    "HTTPS: не задан ни keystore, ни пара cert+key");
-        }
+        SSLServerSocketFactory factory = createSSLServerSocketFactory(
+                keystorePath, keystorePassword, keyPassword, certPath, keyPath);
 
         SSLServerSocket ss = (SSLServerSocket) factory.createServerSocket(port);
         ss.setEnabledProtocols(new String[]{"TLSv1.2", "TLSv1.3"});
@@ -60,6 +51,24 @@ public class SSLManager {
         System.out.println("[SSLManager] Enabled protocols: " +
                 String.join(",", ss.getEnabledProtocols()));
         return ss;
+    }
+
+    /**
+     * Публичная фабрика SSL — используется как для основного HTTPS-сокета,
+     * так и для WSS-сервера (WebRTCSignalingServer).
+     */
+    public static SSLServerSocketFactory createSSLServerSocketFactory(
+            String keystorePath, String keystorePassword, String keyPassword,
+            String certPath, String keyPath) throws Exception {
+
+        if (keystorePath != null && !keystorePath.isEmpty()) {
+            return createFactoryFromKeystore(keystorePath, keystorePassword, keyPassword);
+        } else if (certPath != null && !certPath.isEmpty()
+                && keyPath != null && !keyPath.isEmpty()) {
+            return createFactoryFromPem(certPath, keyPath);
+        }
+        throw new IllegalArgumentException(
+                "HTTPS: не задан ни keystore, ни пара cert+key");
     }
 
     // ---------- keystore (.p12 / .jks) ----------

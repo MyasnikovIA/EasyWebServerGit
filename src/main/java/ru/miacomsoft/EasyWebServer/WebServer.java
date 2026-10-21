@@ -5,6 +5,7 @@ import ru.miacomsoft.EasyWebServer.util.callbackType.CallbackProcedure;
 import ru.miacomsoft.EasyWebServer.util.structObject.JavaInnerClassObject;
 import ru.miacomsoft.EasyWebServer.util.structObject.JavaTerminalClassObject;
 
+import javax.net.ssl.SSLServerSocketFactory;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileWriter;
@@ -27,6 +28,8 @@ public class WebServer implements Runnable {
     private static WebServer server;
     private static WebRTCSignalingServer webrtcServer;
     private static ServerSocket httpRedirectSocket;
+    // STUN-сервер (UDP) для RTCPeerConnection (ICE srflx-кандидаты)
+    private static StunServer stunServer;
 
     public WebServer() {
     }
@@ -51,6 +54,9 @@ public class WebServer implements Runnable {
         isRunServer = false;
         if (webrtcServer != null) {
             webrtcServer.stop();
+        }
+        if (stunServer != null) {
+            stunServer.stop();
         }
         if (httpRedirectSocket != null && !httpRedirectSocket.isClosed()) {
             try { httpRedirectSocket.close(); } catch (Exception ignored) {}
@@ -226,9 +232,34 @@ public class WebServer implements Runnable {
             }
 
             // === ЗАПУСК WEBRTC SIGNALING (видеоконференции) ===
+            // Если HTTPS включён — используем ту же SSL-фабрику,
+            // чтобы signaling работал как WSS на отдельном порту.
             if (ServerConstant.config.VIDEOCHAT_PORT > 0) {
-                webrtcServer = new WebRTCSignalingServer(ServerConstant.config.VIDEOCHAT_PORT);
+                SSLServerSocketFactory rtcSslFactory = null;
+                if (ServerConstant.config.HTTPS_ENABLED && (hasKeystore || hasPem)) {
+                    try {
+                        rtcSslFactory = SSLManager.createSSLServerSocketFactory(
+                                ServerConstant.config.HTTPS_KEYSTORE,
+                                ServerConstant.config.HTTPS_KEYSTORE_PASSWORD,
+                                ServerConstant.config.HTTPS_KEY_PASSWORD,
+                                ServerConstant.config.HTTPS_CERT,
+                                ServerConstant.config.HTTPS_KEY);
+                        System.out.println("[WebServer] WebRTC signaling будет работать как WSS");
+                    } catch (Exception e) {
+                        LOGGER.log(Level.WARNING,
+                                "WebRTC signaling: не удалось создать SSL-фабрику — " +
+                                        "будет plain WS (не заработает с https-страницы)", e);
+                    }
+                }
+                webrtcServer = new WebRTCSignalingServer(
+                        ServerConstant.config.VIDEOCHAT_PORT, rtcSslFactory);
                 webrtcServer.start();
+            }
+
+            // === ЗАПУСК STUN (UDP) для RTCPeerConnection ===
+            if (ServerConstant.config.STUN_PORT > 0) {
+                stunServer = new StunServer(ServerConstant.config.STUN_PORT);
+                stunServer.start();
             }
 
             // === ОПЦИОНАЛЬНЫЙ HTTP→HTTPS REDIRECT (для порта 80 через роутер) ===
@@ -405,7 +436,7 @@ public class WebServer implements Runnable {
     public static boolean isLinux() {
         return getOS().equals("linux");
     }
-
+    
     public static boolean isUnixLike() {
         String os = getOS();
         return os.equals("linux") || os.equals("mac") ||
@@ -418,6 +449,9 @@ public class WebServer implements Runnable {
             LOGGER.info("Shutting down server...");
             if (webrtcServer != null) {
                 webrtcServer.stop();
+            }
+            if (stunServer != null) {
+                stunServer.stop();
             }
             if (httpRedirectSocket != null && !httpRedirectSocket.isClosed()) {
                 try { httpRedirectSocket.close(); } catch (Exception ignored) {}

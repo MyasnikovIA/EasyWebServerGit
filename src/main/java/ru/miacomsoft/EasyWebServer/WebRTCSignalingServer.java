@@ -2,6 +2,9 @@ package ru.miacomsoft.EasyWebServer;
 
 import org.json.JSONObject;
 
+import javax.net.ssl.SSLServerSocket;
+import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLSocket;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -14,22 +17,37 @@ import java.util.concurrent.ConcurrentHashMap;
 public class WebRTCSignalingServer {
 
     private final int port;
+    private final SSLServerSocketFactory sslFactory;   // null → plain WS
     private volatile boolean running = false;
     private ServerSocket server;
 
-    // Комнаты: roomName -> Room
     public static final ConcurrentHashMap<String, Room> ROOMS = new ConcurrentHashMap<>();
 
+    /** Plain WS (только для локальных тестов через http://localhost). */
     public WebRTCSignalingServer(int port) {
+        this(port, null);
+    }
+
+    /** WSS, если передан SSLServerSocketFactory. */
+    public WebRTCSignalingServer(int port, SSLServerSocketFactory sslFactory) {
         this.port = port;
+        this.sslFactory = sslFactory;
     }
 
     public void start() {
         running = true;
         new Thread(() -> {
             try {
-                server = new ServerSocket(port);
-                System.out.println("[WebRTC] Signaling server started on port " + port);
+                if (sslFactory != null) {
+                    SSLServerSocket ss = (SSLServerSocket) sslFactory.createServerSocket(port);
+                    ss.setEnabledProtocols(new String[]{"TLSv1.2", "TLSv1.3"});
+                    ss.setNeedClientAuth(false);
+                    server = ss;
+                    System.out.println("[WebRTC] Signaling server (WSS) started on port " + port);
+                } else {
+                    server = new ServerSocket(port);
+                    System.out.println("[WebRTC] Signaling server (WS, plain) started on port " + port);
+                }
                 while (running) {
                     Socket socket = server.accept();
                     new Thread(() -> handleConnection(socket)).start();
@@ -45,8 +63,20 @@ public class WebRTCSignalingServer {
         try { if (server != null) server.close(); } catch (Exception ignored) {}
     }
 
+    // ============================================================
     private void handleConnection(Socket socket) {
         try (socket) {
+            // Явный TLS handshake (иначе первый read() запускает его неявно
+            // и ошибки приходят в неудобной форме)
+            if (socket instanceof SSLSocket) {
+                try {
+                    ((SSLSocket) socket).startHandshake();
+                } catch (Exception e) {
+                    System.err.println("[WebRTC] TLS handshake failed: " + e.getMessage());
+                    return;
+                }
+            }
+
             BufferedInputStream in = new BufferedInputStream(socket.getInputStream());
             OutputStream out = socket.getOutputStream();
 
@@ -60,7 +90,8 @@ public class WebRTCSignalingServer {
             while ((line = readLine(in)) != null && !line.isEmpty()) {
                 int idx = line.indexOf(':');
                 if (idx > 0) {
-                    headers.put(line.substring(0, idx).trim().toLowerCase(), line.substring(idx + 1).trim());
+                    headers.put(line.substring(0, idx).trim().toLowerCase(),
+                            line.substring(idx + 1).trim());
                 }
             }
 
@@ -77,11 +108,11 @@ public class WebRTCSignalingServer {
                 return;
             }
 
-            // Рукопожатие WebSocket
+            // WebSocket handshake
             String key = headers.get("sec-websocket-key");
             String accept = Base64.getEncoder().encodeToString(
-                    MessageDigest.getInstance("SHA-1").digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes())
-            );
+                    MessageDigest.getInstance("SHA-1").digest(
+                            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes()));
             String resp = "HTTP/1.1 101 Switching Protocols\r\n" +
                     "Upgrade: websocket\r\n" +
                     "Connection: Upgrade\r\n" +
@@ -92,7 +123,7 @@ public class WebRTCSignalingServer {
             String roomName = "main";
             String pass = "";
             for (String p : query.split("&")) {
-                String[] kv = p.split("=");
+                String[] kv = p.split("=", 2);
                 if (kv.length == 2) {
                     if ("room".equals(kv[0])) roomName = java.net.URLDecoder.decode(kv[1], "UTF-8");
                     if ("pass".equals(kv[0])) pass = java.net.URLDecoder.decode(kv[1], "UTF-8");
@@ -108,11 +139,13 @@ public class WebRTCSignalingServer {
             } else {
                 ws.close(1008, "Unknown endpoint");
             }
-        } catch (Exception e) {
-            // ignore
+        } catch (Exception ignored) {
         }
     }
 
+    // ============================================================
+    // PUBLISHER
+    // ============================================================
     private void handlePublisher(WsConnection ws, String roomName, String pass) {
         Room room = ROOMS.computeIfAbsent(roomName, Room::new);
 
@@ -125,14 +158,19 @@ public class WebRTCSignalingServer {
                 room.password = pass;
             }
 
-            if (room.publisherWs != null) {
-                room.publisherWs.close(1000, "replaced");
+            // Закрываем ТОЛЬКО старого publisher'а (один вещатель на комнату),
+            // viewer'ов НЕ трогаем — иначе при переподключении publisher'а
+            // ломается трансляция (был ping-pong "publisher restarted").
+            if (room.publisherWs != null && room.publisherWs != ws) {
+                try { room.publisherWs.close(1000, "replaced"); } catch (Exception ignored) {}
             }
             room.publisherWs = ws;
-            for (WsConnection v : room.viewers.values()) {
-                v.close(1000, "publisher restarted");
+
+            // Уведомляем нового publisher'а обо всех существующих viewer'ах —
+            // чтобы он сразу сделал им offer и трансляция продолжилась.
+            for (String viewerId : room.viewers.keySet()) {
+                ws.sendText(new JSONObject().put("viewerJoined", viewerId).toString());
             }
-            room.viewers.clear();
         }
         System.out.println("[WebRTC] Publisher connected to room: " + roomName);
 
@@ -140,7 +178,7 @@ public class WebRTCSignalingServer {
             WsFrame frame = ws.readFrame();
             if (frame == null) break;
 
-            if (frame.opcode == 0x1) { // Text
+            if (frame.opcode == 0x1) {
                 String text = new String(frame.payload, java.nio.charset.StandardCharsets.UTF_8);
                 try {
                     JSONObject msg = new JSONObject(text);
@@ -150,7 +188,7 @@ public class WebRTCSignalingServer {
                         if (v != null) v.sendText(text);
                     }
                 } catch (Exception ignored) {}
-            } else if (frame.opcode == 0x8) { // Close
+            } else if (frame.opcode == 0x8) {
                 break;
             }
         }
@@ -162,6 +200,9 @@ public class WebRTCSignalingServer {
         System.out.println("[WebRTC] Publisher disconnected from room: " + roomName);
     }
 
+    // ============================================================
+    // SUBSCRIBER
+    // ============================================================
     private void handleSubscriber(WsConnection ws, String roomName, String pass) {
         Room room = ROOMS.computeIfAbsent(roomName, Room::new);
         String viewerId = UUID.randomUUID().toString();
@@ -204,31 +245,30 @@ public class WebRTCSignalingServer {
         synchronized (room) {
             room.viewers.remove(viewerId);
             if (room.publisherWs != null) {
-                try { room.publisherWs.sendText(new JSONObject().put("viewerLeft", viewerId).toString()); } catch (Exception ignored) {}
+                try { room.publisherWs.sendText(
+                        new JSONObject().put("viewerLeft", viewerId).toString()); } catch (Exception ignored) {}
             }
         }
         ws.close(1000, "bye");
         System.out.println("[WebRTC] Viewer left room: " + roomName);
     }
 
-    // Чтение строки HTTP-заголовка с внутренней обработкой исключений
-    private String readLine(InputStream in) {
-        try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            int b;
-            while ((b = in.read()) != -1) {
-                if (b == '\n') {
-                    byte[] arr = baos.toByteArray();
-                    int len = arr.length;
-                    if (len > 0 && arr[len - 1] == '\r') len--;
-                    return new String(arr, 0, len, "ISO-8859-1");
-                }
-                baos.write(b);
+    // ============================================================
+    // Helpers
+    // ============================================================
+    private String readLine(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int b;
+        while ((b = in.read()) != -1) {
+            if (b == '\n') {
+                byte[] arr = baos.toByteArray();
+                int len = arr.length;
+                if (len > 0 && arr[len - 1] == '\r') len--;
+                return new String(arr, 0, len, "ISO-8859-1");
             }
-            return baos.size() > 0 ? baos.toString("ISO-8859-1") : null;
-        } catch (IOException e) {
-            return null;
+            baos.write(b);
         }
+        return baos.size() > 0 ? baos.toString("ISO-8859-1") : null;
     }
 
     static class Room {
@@ -258,7 +298,6 @@ public class WebRTCSignalingServer {
 
         boolean isClosed() { return closed || socket.isClosed(); }
 
-        // Чтение кадра WebSocket с внутренней обработкой исключений
         WsFrame readFrame() {
             try {
                 int b0 = in.read();
@@ -278,7 +317,7 @@ public class WebRTCSignalingServer {
                     for (int i = 0; i < 8; i++) len = (len << 8) | in.read();
                 }
 
-                if (len > 1024 * 1024 * 16) return null; // Frame too big
+                if (len > 1024 * 1024 * 16) return null;
 
                 byte[] mask = null;
                 if (masked) {
@@ -306,7 +345,6 @@ public class WebRTCSignalingServer {
             }
         }
 
-        // Отправка текста с внутренней обработкой исключений
         void sendText(String text) {
             try {
                 byte[] payload = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -338,10 +376,13 @@ public class WebRTCSignalingServer {
             synchronized (this) {
                 try {
                     out.write(0x88);
-                    out.write(2 + reason.getBytes().length);
+                    byte[] rb = reason.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    int pl = 2 + rb.length;
+                    if (pl < 126) out.write(pl);
+                    else { out.write(126); out.write((pl >> 8) & 0xFF); out.write(pl & 0xFF); }
                     out.write((code >> 8) & 0xFF);
                     out.write(code & 0xFF);
-                    out.write(reason.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.write(rb);
                     out.flush();
                 } catch (Exception ignored) {}
                 closed = true;

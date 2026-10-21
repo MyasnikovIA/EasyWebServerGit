@@ -46,6 +46,8 @@ public class Main {
             web.config("HTTPS_KEYSTORE",          "/home/myasnikovia/JavaProject/FileServer_git/certs/keystore.p12");
             web.config("HTTPS_KEYSTORE_PASSWORD", "changeit");
             // web.config("HTTPS_KEY_PASSWORD",   "changeit"); // необязательно
+            web.config("STUN_PORT", "19302");        // UDP
+            web.config("VIDEOCHAT_PORT", "9093");    // WebSocket signaling
         }
 
         web.config("DEFAULT_HOST" , "0.0.0.0");
