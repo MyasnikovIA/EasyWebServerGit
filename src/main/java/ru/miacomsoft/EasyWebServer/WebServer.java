@@ -26,9 +26,8 @@ public class WebServer implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(WebServer.class.getName());
     private static boolean isRunServer = false;
     private static WebServer server;
-    private static WebRTCSignalingServer webrtcServer;
+    private static ConferenceServer conferenceServer; // ЗАМЕНЕНО С WebRTCSignalingServer
     private static ServerSocket httpRedirectSocket;
-    // STUN-сервер (UDP) для RTCPeerConnection (ICE srflx-кандидаты)
     private static StunServer stunServer;
 
     public WebServer() {
@@ -52,8 +51,8 @@ public class WebServer implements Runnable {
 
     public static void stop() {
         isRunServer = false;
-        if (webrtcServer != null) {
-            webrtcServer.stop();
+        if (conferenceServer != null) {
+            conferenceServer.stop();
         }
         if (stunServer != null) {
             stunServer.stop();
@@ -191,10 +190,6 @@ public class WebServer implements Runnable {
 
             ServerSocket ss;
 
-            // ============================================================
-            // HTTPS на основном DEFAULT_PORT (без 443).
-            // Приоритет: keystore.p12 → PEM.
-            // ============================================================
             boolean hasKeystore = ServerConstant.config.HTTPS_KEYSTORE != null
                     && !ServerConstant.config.HTTPS_KEYSTORE.isEmpty();
             boolean hasPem = ServerConstant.config.HTTPS_CERT != null
@@ -231,9 +226,7 @@ public class WebServer implements Runnable {
                 ss = new ServerSocket(port);
             }
 
-            // === ЗАПУСК WEBRTC SIGNALING (видеоконференции) ===
-            // Если HTTPS включён — используем ту же SSL-фабрику,
-            // чтобы signaling работал как WSS на отдельном порту.
+            // === ЗАПУСК CONFERENCE SIGNALING (МНОГОПОЛЬЗОВАТЕЛЬСКИЕ КОНФЕРЕНЦИИ) ===
             if (ServerConstant.config.VIDEOCHAT_PORT > 0) {
                 SSLServerSocketFactory rtcSslFactory = null;
                 if (ServerConstant.config.HTTPS_ENABLED && (hasKeystore || hasPem)) {
@@ -244,25 +237,21 @@ public class WebServer implements Runnable {
                                 ServerConstant.config.HTTPS_KEY_PASSWORD,
                                 ServerConstant.config.HTTPS_CERT,
                                 ServerConstant.config.HTTPS_KEY);
-                        System.out.println("[WebServer] WebRTC signaling будет работать как WSS");
+                        System.out.println("[WebServer] Conference signaling будет работать как WSS");
                     } catch (Exception e) {
-                        LOGGER.log(Level.WARNING,
-                                "WebRTC signaling: не удалось создать SSL-фабрику — " +
-                                        "будет plain WS (не заработает с https-страницы)", e);
+                        LOGGER.log(Level.WARNING, "Conference signaling: не удалось создать SSL-фабрику", e);
                     }
                 }
-                webrtcServer = new WebRTCSignalingServer(
-                        ServerConstant.config.VIDEOCHAT_PORT, rtcSslFactory);
-                webrtcServer.start();
+                conferenceServer = new ConferenceServer(ServerConstant.config.VIDEOCHAT_PORT, rtcSslFactory);
+                conferenceServer.start();
             }
 
-            // === ЗАПУСК STUN (UDP) для RTCPeerConnection ===
+            // === ЗАПУСК STUN (UDP) ===
             if (ServerConstant.config.STUN_PORT > 0) {
                 stunServer = new StunServer(ServerConstant.config.STUN_PORT);
                 stunServer.start();
             }
 
-            // === ОПЦИОНАЛЬНЫЙ HTTP→HTTPS REDIRECT (для порта 80 через роутер) ===
             if (ServerConstant.config.HTTP_REDIRECT_PORT > 0) {
                 startHttpRedirectServer(ServerConstant.config.HTTP_REDIRECT_PORT);
             }
@@ -285,11 +274,6 @@ public class WebServer implements Runnable {
         }
     }
 
-    /**
-     * HTTP→HTTPS redirect: слушает plain HTTP на заданном порту
-     * и отвечает 301 на https://<host>:<DEFAULT_PORT>/<path>.
-     * Нужен, чтобы http:// через роутер на порт 80 не висел.
-     */
     private void startHttpRedirectServer(int httpPort) {
         Thread t = new Thread(() -> {
             try {
@@ -302,8 +286,7 @@ public class WebServer implements Runnable {
                     } catch (Exception ignored) { }
                 }
             } catch (Exception e) {
-                LOGGER.log(Level.SEVERE,
-                        "Не удалось запустить HTTP→HTTPS redirect на порту " + httpPort, e);
+                LOGGER.log(Level.SEVERE, "Не удалось запустить HTTP→HTTPS redirect на порту " + httpPort, e);
             }
         }, "http-redirect");
         t.setDaemon(true);
@@ -313,9 +296,7 @@ public class WebServer implements Runnable {
     private void handleHttpRedirect(Socket client) {
         try (client) {
             client.setSoTimeout(5000);
-            BufferedReader in = new BufferedReader(
-                    new InputStreamReader(client.getInputStream(),
-                            java.nio.charset.StandardCharsets.ISO_8859_1));
+            BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), java.nio.charset.StandardCharsets.ISO_8859_1));
 
             String requestLine = in.readLine();
             if (requestLine == null || requestLine.isEmpty()) return;
@@ -348,8 +329,7 @@ public class WebServer implements Runnable {
                     "Content-Length: 0\r\n" +
                     "Connection: close\r\n" +
                     "\r\n";
-            client.getOutputStream().write(
-                    response.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            client.getOutputStream().write(response.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             client.getOutputStream().flush();
         } catch (Exception ignored) { }
     }
@@ -363,7 +343,6 @@ public class WebServer implements Runnable {
         System.out.println("-----------------------");
         String portStr = String.valueOf(port);
         for (Map.Entry<String, JavaInnerClassObject> entry : ServerResource.pagesJavaInnerClass.entrySet()) {
-            String key = entry.getKey();
             JavaInnerClassObject page = entry.getValue();
             System.out.print("queryType: ");
             System.out.println(page.queryType);
@@ -382,7 +361,6 @@ public class WebServer implements Runnable {
             System.out.println("------- Terminal ------");
             System.out.println("-----------------------");
             for (Map.Entry<String, JavaTerminalClassObject> entry : ServerResource.pagesJavaTerminalClass.entrySet()) {
-                String key = entry.getKey();
                 JavaTerminalClassObject page = entry.getValue();
                 System.out.print("queryType: ");
                 System.out.println(page.classNat);
@@ -394,7 +372,6 @@ public class WebServer implements Runnable {
                 System.out.println("-----------------------");
             }
         }
-
     }
 
     protected synchronized static void WriteToFile(String stringMessage) {
@@ -413,20 +390,12 @@ public class WebServer implements Runnable {
 
     public static String getOS() {
         String osName = System.getProperty("os.name").toLowerCase();
-
-        if (osName.contains("win")) {
-            return "windows";
-        } else if (osName.contains("nix") || osName.contains("nux") || osName.contains("aix")) {
-            return "linux";
-        } else if (osName.contains("mac")) {
-            return "mac";
-        } else if (osName.contains("sunos") || osName.contains("solaris")) {
-            return "solaris";
-        } else if (osName.contains("bsd")) {
-            return "bsd";
-        } else {
-            return "unknown";
-        }
+        if (osName.contains("win")) return "windows";
+        else if (osName.contains("nix") || osName.contains("nux") || osName.contains("aix")) return "linux";
+        else if (osName.contains("mac")) return "mac";
+        else if (osName.contains("sunos") || osName.contains("solaris")) return "solaris";
+        else if (osName.contains("bsd")) return "bsd";
+        else return "unknown";
     }
 
     public static boolean isWindows() {
@@ -436,7 +405,7 @@ public class WebServer implements Runnable {
     public static boolean isLinux() {
         return getOS().equals("linux");
     }
-    
+
     public static boolean isUnixLike() {
         String os = getOS();
         return os.equals("linux") || os.equals("mac") ||
@@ -447,8 +416,8 @@ public class WebServer implements Runnable {
     static void shutDown() {
         try {
             LOGGER.info("Shutting down server...");
-            if (webrtcServer != null) {
-                webrtcServer.stop();
+            if (conferenceServer != null) {
+                conferenceServer.stop();
             }
             if (stunServer != null) {
                 stunServer.stop();
