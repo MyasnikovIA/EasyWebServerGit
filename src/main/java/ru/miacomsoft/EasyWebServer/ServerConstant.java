@@ -15,44 +15,45 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public final class ServerConstant {
-    // Конфигурация по умолчанию
     public static ServerConstant config = new ServerConstant("");
 
-    // Поля конфигурации
     public String DATABASE_NAME = "jdbc:postgresql://your_host:your_port/your_database";
     public String DATABASE_USER_NAME = "postgres";
     public String DATABASE_USER_PASS = "******";
 
-    public int ORACLE_POOL_SIZE = 10;      // максимальное количество соединений Oracle
-    public int POSTGRES_MIN_POOL_SIZE = 2; // минимальное количество соединений PostgreSQL
-    public int POSTGRES_MAX_POOL_SIZE = 20; // максимальное количество соединений PostgreSQL
+    public int ORACLE_POOL_SIZE = 10;
+    public int POSTGRES_MIN_POOL_SIZE = 2;
+    public int POSTGRES_MAX_POOL_SIZE = 20;
 
-    // === HTTPS ===
-    // Поддерживаются два способа (как в FileServer_git):
-    //   A) "keystore" + "password" (PKCS12/JKS) — приоритетный
-    //   B) "cert" + "key" (PEM fullchain + PKCS#8 private key)
-    // Если задан HTTPS_KEYSTORE — используется он, PEM игнорируется.
     public boolean HTTPS_ENABLED = false;
-    public String HTTPS_KEYSTORE = "";             // путь к .p12/.jks
-    public String HTTPS_KEYSTORE_PASSWORD = "";    // пароль keystore
-    public String HTTPS_KEY_PASSWORD = "";         // пароль ключа (если отличается)
-    public String HTTPS_CERT = "";                 // путь к fullchain.crt/.pem (fallback)
-    public String HTTPS_KEY = "";                  // путь к privkey.key (PKCS#8)
+    public String HTTPS_KEYSTORE = "";
+    public String HTTPS_KEYSTORE_PASSWORD = "";
+    public String HTTPS_KEY_PASSWORD = "";
+    public String HTTPS_CERT = "";
+    public String HTTPS_KEY = "";
 
-    // === HTTP → HTTPS redirect ===
-    // 0 = выключено. Если > 0 — на этом порту поднимается plain HTTP-сервер,
-    // который отвечает 301 на https://<host>:<DEFAULT_PORT>/<path>.
     public int HTTP_REDIRECT_PORT = 0;
 
-    // === WebRTC signaling (legacy WebSocket, plain/без TLS — на отдельном порту) ===
-    public int VIDEOCHAT_PORT = 0;   // 0 = выключено
+    // Порт ConferenceServer (mesh WSS)
+    public int CONFERENCE_PORT = 0;
 
-    // === STUN (UDP) для ICE в RTCPeerConnection ===
-    // 0 = выключено. Пример: 19302.
-    // Используется браузером в `new RTCPeerConnection({ iceServers: [{ urls: 'stun:host:port' }] })`.
+    // Порт WebRTCSignalingServer (pub/sub WSS для webrtc_chat.html)
+    public int VIDEOCHAT_PORT = 0;
+
+    // Порт TurnServer
+    public int TURN_PORT = 0;
+
+    // Публичный IP или host для TURN (что анонсировать клиентам)
+    public String TURN_PUBLIC_IP = "";
+    public String TURN_PUBLIC_HOST = "";
+
+    // Диапазон портов ретрансляции TURN (UDP)
+    public int TURN_RELAY_PORT_START = 10000;
+    public int TURN_RELAY_PORT_END = 10050;
+
+    // Порт STUN (UDP)
     public int STUN_PORT = 0;
 
-    // Новая структура для хранения множественных БД
     public Map<String, DatabaseConfig> DATABASES = new HashMap<>();
 
     public String LIB_DIR = "D:\\JavaProject\\HttpServer-JAVA\\lib";
@@ -73,7 +74,7 @@ public final class ServerConstant {
 
     public String DEFAULT_HOST = "0.0.0.0";
     public String DEFAULT_PORT = "9092";
-    public int LENGTH_CAHE = 10_485_760; // 10MB
+    public int LENGTH_CAHE = 10_485_760;
 
     public String SERVER_HOM = "/data/data/com.termux/files/home2";
     public String APPLICATION_OCTET_STREAM = "application/octet-stream";
@@ -88,7 +89,7 @@ public final class ServerConstant {
     public String ENCODING_UTF8 = "UTF-8";
     public String GIT_URL = "";
     public String GIT_MASTER = "";
-    public int GIT_INTERVAL = 120; // в минутах
+    public int GIT_INTERVAL = 120;
     public String LOG_FILE = "";
     public final int MAX_HEADER_SIZE = 4728;
 
@@ -97,7 +98,6 @@ public final class ServerConstant {
     public final List<String> LIB_JAR = new ArrayList<>();
     public final Map<String, String> MIME_MAP = new HashMap<>();
 
-    // Статический инициализатор для MIME типов
     static {
         Map<String, String> defaultMimeTypes = Map.ofEntries(
                 Map.entry("appcache", "text/cache-manifest"),
@@ -132,26 +132,15 @@ public final class ServerConstant {
                 Map.entry("php", "text/plain"),
                 Map.entry("ts", "video/mp2t")
         );
-
         config.MIME_MAP.putAll(defaultMimeTypes);
     }
 
     public ServerConstant(String pathIniConfig) {
-        if (pathIniConfig == null || pathIniConfig.isEmpty()) {
-            return;
-        }
-
-        System.out.println("pathIniConfig: " + pathIniConfig);
+        if (pathIniConfig == null || pathIniConfig.isEmpty()) return;
         File configFile = new File(pathIniConfig);
         if (configFile.exists()) {
             String configContent = readConfigFile(configFile);
-            System.out.println("configContent: " + configContent);
-            if (!configContent.isEmpty()) {
-                parseConfig(new JSONObject(configContent));
-            }
-        } else {
-            LIB_CSS.clear();
-            LIB_JS.clear();
+            if (!configContent.isEmpty()) parseConfig(new JSONObject(configContent));
         }
     }
 
@@ -160,131 +149,77 @@ public final class ServerConstant {
         try (BufferedReader reader = new BufferedReader(new FileReader(configFile))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                // Удаляем комментарии
-                int commentIndex = line.indexOf('#');
-                if (commentIndex != -1) {
-                    line = line.substring(0, commentIndex);
-                }
+                int c = line.indexOf('#');
+                if (c != -1) line = line.substring(0, c);
                 sb.append(line.trim());
             }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        } catch (IOException e) { e.printStackTrace(); }
         return sb.toString();
     }
 
     private void parseConfig(JSONObject jsonConfig) {
-        // Настройки базы данных
-        setIfPresent(jsonConfig, "DATABASE_NAME", val -> DATABASE_NAME = val);
-        setIfPresent(jsonConfig, "DATABASE_USER_NAME", val -> DATABASE_USER_NAME = val);
-        setIfPresent(jsonConfig, "DATABASE_USER_PASS", val -> DATABASE_USER_PASS = val);
+        setIfPresent(jsonConfig, "DATABASE_NAME", v -> DATABASE_NAME = v);
+        setIfPresent(jsonConfig, "DATABASE_USER_NAME", v -> DATABASE_USER_NAME = v);
+        setIfPresent(jsonConfig, "DATABASE_USER_PASS", v -> DATABASE_USER_PASS = v);
 
-        // Парсим множественные БД
         if (jsonConfig.has("DATABASES")) {
             JSONObject dbs = jsonConfig.getJSONObject("DATABASES");
             dbs.keys().forEachRemaining(key -> {
-                String connStr = dbs.getString(key);
-                DatabaseConfig dbConfig = DatabaseConfig.parse(connStr);
-                if (dbConfig != null) {
-                    DATABASES.put(key, dbConfig);
-                    System.out.println("Loaded database config: " + key + " -> " + dbConfig.getType());
-                }
+                DatabaseConfig dbConfig = DatabaseConfig.parse(dbs.getString(key));
+                if (dbConfig != null) DATABASES.put(key, dbConfig);
             });
         }
 
-        setIfPresent(jsonConfig, "APP_NAME", val -> APP_NAME = val);
+        setIfPresent(jsonConfig, "APP_NAME", v -> APP_NAME = v);
+        setBooleanIfPresent(jsonConfig, "DEBUG", v -> DEBUG = v);
+        setBooleanIfPresent(jsonConfig, "GZIPPABLE", v -> GZIPPABLE = v);
+        setBooleanIfPresent(jsonConfig, "CAHEBLE", v -> CAHEBLE = v);
 
-        // Булевы настройки
-        setBooleanIfPresent(jsonConfig, "DEBUG", val -> DEBUG = val);
-        setBooleanIfPresent(jsonConfig, "GZIPPABLE", val -> GZIPPABLE = val);
-        setBooleanIfPresent(jsonConfig, "CAHEBLE", val -> CAHEBLE = val);
-
-        // Строковые настройки
-        setIfPresent(jsonConfig, "LOGIN_PAGE", val -> LOGIN_PAGE = val);
-        setIfPresent(jsonConfig, "PAGE_404", val -> PAGE_404 = val);
-        setIfPresent(jsonConfig, "FORWARD_SINGLE_SLASH", val -> FORWARD_SINGLE_SLASH = val);
-        setIfPresent(jsonConfig, "FORWARD_DOUBLE_SLASH", val -> FORWARD_DOUBLE_SLASH = val);
-        setIfPresent(jsonConfig, "COMPONENT_PATH", val -> COMPONENT_PATH = val);
-        setIfPresent(jsonConfig, "WEBAPP_DIR", val -> {
-            // Обработка нескольких каталогов
-            if (val.contains(";")) {
-                String[] dirs = val.split(";");
+        setIfPresent(jsonConfig, "LOGIN_PAGE", v -> LOGIN_PAGE = v);
+        setIfPresent(jsonConfig, "PAGE_404", v -> PAGE_404 = v);
+        setIfPresent(jsonConfig, "COMPONENT_PATH", v -> COMPONENT_PATH = v);
+        setIfPresent(jsonConfig, "WEBAPP_DIR", v -> {
+            if (v.contains(";")) {
                 WEBAPP_DIRS.clear();
-                for (String dir : dirs) {
-                    String trimmedDir = dir.trim();
-                    if (!trimmedDir.isEmpty()) {
-                        if (!trimmedDir.contains("/") && !trimmedDir.contains("\\")) {
-                            // Относительный путь - добавляем SERVER_HOM
-                            trimmedDir = SERVER_HOM + File.separator + trimmedDir;
-                        }
-                        WEBAPP_DIRS.add(trimmedDir);
+                for (String dir : v.split(";")) {
+                    String t = dir.trim();
+                    if (!t.isEmpty()) {
+                        if (!t.contains("/") && !t.contains("\\")) t = SERVER_HOM + File.separator + t;
+                        WEBAPP_DIRS.add(t);
                     }
                 }
-                // Для обратной совместимости сохраняем первый каталог в WEBAPP_DIR
-                if (!WEBAPP_DIRS.isEmpty()) {
-                    WEBAPP_DIR = WEBAPP_DIRS.get(0);
-                }
+                if (!WEBAPP_DIRS.isEmpty()) WEBAPP_DIR = WEBAPP_DIRS.get(0);
             } else {
                 WEBAPP_DIRS.clear();
-                String trimmedVal = val.trim();
-                if (!trimmedVal.contains("/") && !trimmedVal.contains("\\")) {
-                    trimmedVal = SERVER_HOM + File.separator + trimmedVal;
-                }
-                WEBAPP_DIRS.add(trimmedVal);
-                WEBAPP_DIR = trimmedVal;
+                String t = v.trim();
+                if (!t.contains("/") && !t.contains("\\")) t = SERVER_HOM + File.separator + t;
+                WEBAPP_DIRS.add(t);
+                WEBAPP_DIR = t;
             }
         });
 
-        setIfPresent(jsonConfig, "WEBAPP_DIR", val -> WEBAPP_DIR = val);
-        setIfPresent(jsonConfig, "WEBAPP_SYSTEM_DIR", val -> WEBAPP_SYSTEM_DIR = val);
-        setIfPresent(jsonConfig, "DEFAULT_HOST", val -> DEFAULT_HOST = val);
-        setIfPresent(jsonConfig, "DEFAULT_PORT", val -> DEFAULT_PORT = val);
-        setIfPresent(jsonConfig, "SERVER_HOM", val -> SERVER_HOM = val);
-        setIfPresent(jsonConfig, "APPLICATION_OCTET_STREAM", val -> APPLICATION_OCTET_STREAM = val);
-        setIfPresent(jsonConfig, "TEXT_PLAIN", val -> TEXT_PLAIN = val);
-        setIfPresent(jsonConfig, "TEXT_HTML", val -> TEXT_HTML = val);
-        setIfPresent(jsonConfig, "INDEX_PAGE", val -> INDEX_PAGE = val);
-        setIfPresent(jsonConfig, "CONTENT_TYPE", val -> CONTENT_TYPE = val);
-        setIfPresent(jsonConfig, "CONTENT_LENGTH", val -> CONTENT_LENGTH = val);
-        setIfPresent(jsonConfig, "CONTENT_ENCODING", val -> CONTENT_ENCODING = val);
-        setIfPresent(jsonConfig, "ENCODING_GZIP", val -> ENCODING_GZIP = val);
-        setIfPresent(jsonConfig, "ENCODING_UTF8", val -> ENCODING_UTF8 = val);
-        setIfPresent(jsonConfig, "GIT_URL", val -> GIT_URL = val);
-        setIfPresent(jsonConfig, "GIT_MASTER", val -> GIT_MASTER = val);
-        setIfPresent(jsonConfig, "LOG_FILE", val -> LOG_FILE = val);
+        setIfPresent(jsonConfig, "WEBAPP_SYSTEM_DIR", v -> WEBAPP_SYSTEM_DIR = v);
+        setIfPresent(jsonConfig, "DEFAULT_HOST", v -> DEFAULT_HOST = v);
+        setIfPresent(jsonConfig, "DEFAULT_PORT", v -> DEFAULT_PORT = v);
+        setIfPresent(jsonConfig, "SERVER_HOM", v -> SERVER_HOM = v);
+        setIfPresent(jsonConfig, "INDEX_PAGE", v -> INDEX_PAGE = v);
+        setIfPresent(jsonConfig, "LOG_FILE", v -> LOG_FILE = v);
 
-        // Числовые настройки
-        setIntIfPresent(jsonConfig, "LENGTH_CAHE", val -> LENGTH_CAHE = val);
-        setIntIfPresent(jsonConfig, "GIT_INTERVAL", val -> GIT_INTERVAL = val);
+        setIntIfPresent(jsonConfig, "LENGTH_CAHE", v -> LENGTH_CAHE = v);
+        setIntIfPresent(jsonConfig, "GIT_INTERVAL", v -> GIT_INTERVAL = v);
+        setIntIfPresent(jsonConfig, "ORACLE_POOL_SIZE", v -> ORACLE_POOL_SIZE = v);
+        setIntIfPresent(jsonConfig, "POSTGRES_MIN_POOL_SIZE", v -> POSTGRES_MIN_POOL_SIZE = v);
+        setIntIfPresent(jsonConfig, "POSTGRES_MAX_POOL_SIZE", v -> POSTGRES_MAX_POOL_SIZE = v);
 
-        // Списки
         setListIfPresent(jsonConfig, "LIB_CSS", LIB_CSS);
         setListIfPresent(jsonConfig, "LIB_JS", LIB_JS);
         setListIfPresent(jsonConfig, "LIB_JAR", LIB_JAR);
 
-        // MIME типы
         if (jsonConfig.has("MIME_MAP")) {
             JSONObject mimeMap = jsonConfig.getJSONObject("MIME_MAP");
-            mimeMap.keys().forEachRemaining(key ->
-                    MIME_MAP.put(key, mimeMap.getString(key))
-            );
+            mimeMap.keys().forEachRemaining(k -> MIME_MAP.put(k, mimeMap.getString(k)));
         }
 
-        // Корректировка путей
-        if (!WEBAPP_DIR.contains("/")) {
-            WEBAPP_DIR = SERVER_HOM + '/' + WEBAPP_DIR;
-        }
-
-        // Настройка Git
-        if (!GIT_URL.isEmpty()) {
-            setupGitSync();
-        }
-
-        setIntIfPresent(jsonConfig, "ORACLE_POOL_SIZE", val -> ORACLE_POOL_SIZE = val);
-        setIntIfPresent(jsonConfig, "POSTGRES_MIN_POOL_SIZE", val -> POSTGRES_MIN_POOL_SIZE = val);
-        setIntIfPresent(jsonConfig, "POSTGRES_MAX_POOL_SIZE", val -> POSTGRES_MAX_POOL_SIZE = val);
-
-        // === HTTPS: вложенный блок "https" (как в FileServer_git) ===
         if (jsonConfig.has("https")) {
             JSONObject h = jsonConfig.getJSONObject("https");
             HTTPS_ENABLED = h.optBoolean("enabled", false);
@@ -295,202 +230,84 @@ public final class ServerConstant {
             HTTPS_KEY_PASSWORD = h.optString("keyPassword", "");
         }
 
-        // Плоские ключи (для web.config(...) из кода)
-        setBooleanIfPresent(jsonConfig, "HTTPS_ENABLED", val -> HTTPS_ENABLED = val);
-        setIfPresent(jsonConfig, "HTTPS_CERT", val -> HTTPS_CERT = val);
-        setIfPresent(jsonConfig, "HTTPS_KEY", val -> HTTPS_KEY = val);
-        setIfPresent(jsonConfig, "HTTPS_KEYSTORE", val -> HTTPS_KEYSTORE = val);
-        setIfPresent(jsonConfig, "HTTPS_KEYSTORE_PASSWORD", val -> HTTPS_KEYSTORE_PASSWORD = val);
-        setIfPresent(jsonConfig, "HTTPS_KEY_PASSWORD", val -> HTTPS_KEY_PASSWORD = val);
+        setBooleanIfPresent(jsonConfig, "HTTPS_ENABLED", v -> HTTPS_ENABLED = v);
+        setIfPresent(jsonConfig, "HTTPS_CERT", v -> HTTPS_CERT = v);
+        setIfPresent(jsonConfig, "HTTPS_KEY", v -> HTTPS_KEY = v);
+        setIfPresent(jsonConfig, "HTTPS_KEYSTORE", v -> HTTPS_KEYSTORE = v);
+        setIfPresent(jsonConfig, "HTTPS_KEYSTORE_PASSWORD", v -> HTTPS_KEYSTORE_PASSWORD = v);
+        setIfPresent(jsonConfig, "HTTPS_KEY_PASSWORD", v -> HTTPS_KEY_PASSWORD = v);
 
-        // === HTTP → HTTPS redirect ===
-        setIntIfPresent(jsonConfig, "HTTP_REDIRECT_PORT", val -> HTTP_REDIRECT_PORT = val);
-
-        // === WebRTC signaling ===
-        setIntIfPresent(jsonConfig, "VIDEOCHAT_PORT", val -> VIDEOCHAT_PORT = val);
-
-        // === STUN (UDP) для RTCPeerConnection ===
-        setIntIfPresent(jsonConfig, "STUN_PORT", val -> STUN_PORT = val);
+        setIntIfPresent(jsonConfig, "HTTP_REDIRECT_PORT", v -> HTTP_REDIRECT_PORT = v);
+        setIntIfPresent(jsonConfig, "CONFERENCE_PORT", v -> CONFERENCE_PORT = v);
+        setIntIfPresent(jsonConfig, "VIDEOCHAT_PORT", v -> VIDEOCHAT_PORT = v);
+        setIntIfPresent(jsonConfig, "TURN_PORT", v -> TURN_PORT = v);
+        setIntIfPresent(jsonConfig, "STUN_PORT", v -> STUN_PORT = v);
+        setIfPresent(jsonConfig, "TURN_PUBLIC_IP", v -> TURN_PUBLIC_IP = v);
+        setIfPresent(jsonConfig, "TURN_PUBLIC_HOST", v -> TURN_PUBLIC_HOST = v);
+        setIntIfPresent(jsonConfig, "TURN_RELAY_PORT_START", v -> TURN_RELAY_PORT_START = v);
+        setIntIfPresent(jsonConfig, "TURN_RELAY_PORT_END", v -> TURN_RELAY_PORT_END = v);
     }
 
     private void setIfPresent(JSONObject json, String key, StringConsumer setter) {
-        if (json.has(key)) {
-            setter.accept(json.getString(key));
-        }
+        if (json.has(key)) setter.accept(json.getString(key));
     }
 
     private void setBooleanIfPresent(JSONObject json, String key, BooleanConsumer setter) {
         if (json.has(key)) {
             Object v = json.get(key);
-            if (v instanceof Boolean) {
-                setter.accept((Boolean) v);
-            } else {
-                setter.accept(String.valueOf(v).equals("true"));
-            }
+            if (v instanceof Boolean) setter.accept((Boolean) v);
+            else setter.accept(String.valueOf(v).equals("true"));
         }
     }
 
     private void setIntIfPresent(JSONObject json, String key, IntConsumer setter) {
+        if (json.has(key)) setter.accept(json.getInt(key));
+    }
+
+    private void setListIfPresent(JSONObject json, String key, List<String> target) {
         if (json.has(key)) {
-            setter.accept(json.getInt(key));
+            target.clear();
+            JSONArray arr = json.getJSONArray(key);
+            for (int i = 0; i < arr.length(); i++) target.add(arr.getString(i));
         }
     }
 
-    private void setListIfPresent(JSONObject json, String key, List<String> targetList) {
-        if (json.has(key)) {
-            targetList.clear();
-            JSONArray array = json.getJSONArray(key);
-            for (int i = 0; i < array.length(); i++) {
-                targetList.add(array.getString(i));
-            }
-        }
-    }
+    @FunctionalInterface private interface StringConsumer { void accept(String v); }
+    @FunctionalInterface private interface BooleanConsumer { void accept(boolean v); }
+    @FunctionalInterface private interface IntConsumer { void accept(int v); }
 
-    private void setupGitSync() {
-        // Первоначальный clone/pull
-        gitSync();
-
-        // Запуск периодической синхронизации
-        Thread gitSyncThread = new Thread(() -> {
-            while (true) {
-                try {
-                    TimeUnit.MINUTES.sleep(GIT_INTERVAL);
-                    gitSync();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        }, "GitSyncThread");
-
-        gitSyncThread.setDaemon(true);
-        gitSyncThread.start();
-    }
-
-    private void gitSync() {
-        System.out.println("====================================");
-        if (new File(WEBAPP_DIR + "/.git").exists()) {
-            RunProcess.exec(new File(WEBAPP_DIR), true, "git pull --progress \"origin\" ");
-        } else {
-            String dirPath = WEBAPP_DIR.substring(0, WEBAPP_DIR.lastIndexOf("/"));
-            String dirName = WEBAPP_DIR.substring(WEBAPP_DIR.lastIndexOf("/") + 1);
-            RunProcess.exec(new File(dirPath), true, "git clone " + GIT_URL + " " + dirName);
-        }
-        System.out.println("====================================");
-        System.out.println();
-    }
-
-    // Вспомогательные функциональные интерфейсы
-    @FunctionalInterface
-    private interface StringConsumer {
-        void accept(String value);
-    }
-
-    @FunctionalInterface
-    private interface BooleanConsumer {
-        void accept(boolean value);
-    }
-
-    @FunctionalInterface
-    private interface IntConsumer {
-        void accept(int value);
-    }
-
-    // Методы для динамического изменения свойств
     public static boolean setProp(String propertyName, String propertyValue) {
         try {
             Field field = config.getClass().getDeclaredField(propertyName);
             field.setAccessible(true);
-
             Class<?> type = field.getType();
-            if (type == String.class) {
-                field.set(config, propertyValue);
-            } else if (type == boolean.class || type == Boolean.class) {
-                field.set(config, "true".equals(propertyValue));
-            } else if (type == int.class || type == Integer.class) {
-                field.set(config, Integer.parseInt(propertyValue));
-            } else {
-                return false;
-            }
+            if (type == String.class) field.set(config, propertyValue);
+            else if (type == boolean.class || type == Boolean.class) field.set(config, "true".equals(propertyValue));
+            else if (type == int.class || type == Integer.class) field.set(config, Integer.parseInt(propertyValue));
+            else return false;
             return true;
-        } catch (Exception e) {
-            System.err.println("Error setting property: " + e.getMessage());
-            return false;
-        }
+        } catch (Exception e) { return false; }
     }
 
     public static boolean setProp(String propertyName, boolean propertyValue) {
         try {
             Field field = config.getClass().getDeclaredField(propertyName);
             field.setAccessible(true);
-
             if (field.getType() == boolean.class || field.getType() == Boolean.class) {
                 field.setBoolean(config, propertyValue);
                 return true;
             }
             return false;
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            System.err.println("Error setting boolean property: " + e.getMessage());
-            return false;
-        }
+        } catch (Exception e) { return false; }
     }
 
-    // Методы для добавления путей
-    public void addPathCss(String path) {
-        LIB_CSS.add(path);
-    }
+    public void addPathCss(String path) { LIB_CSS.add(path); }
+    public void addPathJs(String path) { LIB_JS.add(path); }
+    public void addPathJar(String path) { LIB_JAR.add(path); }
+    public void addMime(String ext, String mime) { MIME_MAP.put(ext, mime); }
 
-    public void addPathJs(String path) {
-        LIB_JS.add(path);
-    }
-
-    public void addPathJar(String path) {
-        LIB_JAR.add(path);
-    }
-
-    public void addMime(String fileExtension, String mimeType) {
-        MIME_MAP.put(fileExtension, mimeType);
-    }
-
-    /**
-     * Получить конфигурацию БД по имени.
-     * Если имя не указано или равно "default", возвращает БД по умолчанию.
-     */
     public DatabaseConfig getDatabaseConfig(String dbName) {
-        if (dbName == null || dbName.isEmpty() || "default".equals(dbName)) {
-            return DATABASES.get("default");
-        }
+        if (dbName == null || dbName.isEmpty() || "default".equals(dbName)) return DATABASES.get("default");
         return DATABASES.get(dbName);
-    }
-
-    /**
-     * Парсит JDBC URL для получения хоста, порта, базы данных
-     */
-    private DatabaseConfig.ConnectionInfo parseJdbcUrl(String url) {
-        DatabaseConfig.ConnectionInfo info = new DatabaseConfig.ConnectionInfo();
-        if (url == null || url.isEmpty()) {
-            return info;
-        }
-
-        try {
-            if (url.contains("://")) {
-                String withoutProtocol = url.substring(url.indexOf("://") + 3);
-                String[] hostPortDb = withoutProtocol.split("/", 2);
-                if (hostPortDb.length > 0) {
-                    String[] hostPort = hostPortDb[0].split(":");
-                    info.host = hostPort[0];
-                    if (hostPort.length > 1) {
-                        info.port = hostPort[1];
-                    }
-                }
-                if (hostPortDb.length > 1) {
-                    info.database = hostPortDb[1];
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error parsing JDBC URL: " + e.getMessage());
-        }
-
-        return info;
     }
 }
